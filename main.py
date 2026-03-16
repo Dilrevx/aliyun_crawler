@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -34,7 +35,14 @@ def _setup_logging(log_dir: str | None) -> None:
     if log_dir:
         log_path = Path(log_dir)
         log_path.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_path / "crawler.log", encoding="utf-8"))
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"{timestamp}-crawler.log"
+        handlers.append(
+            logging.FileHandler(
+                log_path / filename,
+                encoding="utf-8",
+            )
+        )
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
