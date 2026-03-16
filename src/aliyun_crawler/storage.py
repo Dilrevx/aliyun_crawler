@@ -1,0 +1,229 @@
+"""Persistent storage layer for the Aliyun AVD crawler.
+
+Responsibilities
+----------------
+* Persist raw :class:`~aliyun_crawler.models.RawAVDEntry` objects to JSON.
+* Write enriched :class:`~aliyun_crawler.models.AVDCveEntry` objects to
+  per-CVE YAML files (``<data_dir>/yaml/CVE-XXXX-XXXX.yaml``).
+* Maintain an incremental-crawl state file (``<data_dir>/.state.json``) that
+  tracks the timestamp of the *most recently seen* entry so subsequent runs
+  can pass ``since`` to the crawler.
+* Write a separate "commit-filtered" JSONL index of entries that have at least
+  one GitHub commit / PR / issue link (``<data_dir>/has_commit.jsonl``).
+
+Directory layout::
+
+    <data_dir>/
+        .state.json          – incremental crawl state
+        raw/                 – raw RawAVDEntry JSON files
+            CVE-2024-12345.json
+            ...
+        yaml/                – enriched AVDCveEntry YAML files
+            CVE-2024-12345.yaml
+            ...
+        has_commit.jsonl     – newline-delimited JSON index of commit-linked entries
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+import yaml
+
+from aliyun_crawler.models import AVDCveEntry, RawAVDEntry
+
+logger = logging.getLogger(__name__)
+
+_STATE_FILE = ".state.json"
+_HAS_COMMIT_FILE = "has_commit.jsonl"
+
+
+class CrawlStorage:
+    """File-system storage for crawled CVE data with incremental-state tracking.
+
+    Args:
+        data_dir: Root directory for all output.  Created on first use.
+    """
+
+    def __init__(self, data_dir: str = "./output/aliyun_cve") -> None:
+        self.root = Path(data_dir)
+        self.raw_dir = self.root / "raw"
+        self.yaml_dir = self.root / "yaml"
+        self._ensure_dirs()
+
+    # ------------------------------------------------------------------
+    # Directory management
+    # ------------------------------------------------------------------
+
+    def _ensure_dirs(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.raw_dir.mkdir(exist_ok=True)
+        self.yaml_dir.mkdir(exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Incremental-crawl state
+    # ------------------------------------------------------------------
+
+    def load_state(self) -> dict[str, Any]:
+        """Load the persisted crawl state dict."""
+        path = self.root / _STATE_FILE
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("Could not load state file: %s", exc)
+        return {}
+
+    def save_state(self, state: dict[str, Any]) -> None:
+        """Persist the crawl state dict."""
+        path = self.root / _STATE_FILE
+        path.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
+
+    def get_last_seen_date(self) -> Optional[str]:
+        """Return the ISO date string of the most recently crawled entry, or None."""
+        return self.load_state().get("last_seen_date")
+
+    def update_last_seen_date(self, entry: RawAVDEntry) -> None:
+        """Update the state file with the modified date of *entry* if it is newer."""
+        ref_date = entry.modified_date or entry.crawled_at
+        if ref_date is None:
+            return
+        state = self.load_state()
+        current = state.get("last_seen_date")
+        new_val = ref_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if current is None or new_val > current:
+            state["last_seen_date"] = new_val
+            state["last_seen_cve"] = entry.cve_id
+            state["updated_at"] = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.save_state(state)
+
+    # ------------------------------------------------------------------
+    # Raw entry persistence
+    # ------------------------------------------------------------------
+
+    def save_raw(self, entry: RawAVDEntry) -> Path:
+        """Write *entry* as JSON to ``<data_dir>/raw/<CVE-ID>.json``.
+
+        Existing files are overwritten (idempotent on re-crawl).
+        """
+        path = self.raw_dir / f"{entry.cve_id}.json"
+        path.write_text(
+            entry.model_dump_json(indent=2, exclude_none=True),
+            encoding="utf-8",
+        )
+        logger.debug("Saved raw entry: %s", path)
+        return path
+
+    def load_raw(self, cve_id: str) -> Optional[RawAVDEntry]:
+        """Load a previously-saved raw entry by CVE ID, or return *None*."""
+        path = self.raw_dir / f"{cve_id}.json"
+        if not path.exists():
+            return None
+        try:
+            return RawAVDEntry.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.error("Could not load raw entry %s: %s", cve_id, exc)
+            return None
+
+    def raw_exists(self, cve_id: str) -> bool:
+        return (self.raw_dir / f"{cve_id}.json").exists()
+
+    # ------------------------------------------------------------------
+    # Enriched YAML persistence
+    # ------------------------------------------------------------------
+
+    def save_yaml(self, entry: AVDCveEntry) -> Path:
+        """Write *entry* as YAML to ``<data_dir>/yaml/<CVE-ID>.yaml``."""
+        path = self.yaml_dir / f"{entry.CVE}.yaml"
+        doc = entry.to_yaml_dict()
+        path.write_text(
+            yaml.dump(doc, allow_unicode=True, default_flow_style=False, sort_keys=False),
+            encoding="utf-8",
+        )
+        logger.debug("Saved YAML entry: %s", path)
+        return path
+
+    def load_yaml(self, cve_id: str) -> Optional[AVDCveEntry]:
+        """Load a previously-saved enriched entry by CVE ID, or return *None*."""
+        path = self.yaml_dir / f"{cve_id}.yaml"
+        if not path.exists():
+            return None
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            return AVDCveEntry(**doc)
+        except Exception as exc:
+            logger.error("Could not load YAML entry %s: %s", cve_id, exc)
+            return None
+
+    def yaml_exists(self, cve_id: str) -> bool:
+        return (self.yaml_dir / f"{cve_id}.yaml").exists()
+
+    # ------------------------------------------------------------------
+    # Commit-linked index
+    # ------------------------------------------------------------------
+
+    def append_has_commit(self, entry: RawAVDEntry) -> None:
+        """Append a minimal JSON record for *entry* to ``has_commit.jsonl``.
+
+        Only entries with at least one ``patch_url`` should be written here.
+        """
+        if not entry.patch_urls:
+            return
+        path = self.root / _HAS_COMMIT_FILE
+        record = {
+            "cve_id": entry.cve_id,
+            "patch_urls": entry.patch_urls,
+            "severity": entry.severity,
+            "cvss_score": entry.cvss_score,
+            "cwe_id": entry.cwe_id,
+            "modified_date": (
+                entry.modified_date.strftime("%Y-%m-%d") if entry.modified_date else None
+            ),
+        }
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def load_has_commit_index(self) -> list[dict[str, Any]]:
+        """Return all records from the commit-linked index."""
+        path = self.root / _HAS_COMMIT_FILE
+        if not path.exists():
+            return []
+        records: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        return records
+
+    # ------------------------------------------------------------------
+    # Batch helpers
+    # ------------------------------------------------------------------
+
+    def process_and_store(self, entry: RawAVDEntry) -> AVDCveEntry:
+        """Save *entry* as raw JSON, build an :class:`AVDCveEntry`, save as YAML,
+        update the commit index, and advance the incremental-state timestamp.
+
+        Returns the created :class:`AVDCveEntry`.
+        """
+        self.save_raw(entry)
+        cve_entry = AVDCveEntry.from_raw(entry)
+        self.save_yaml(cve_entry)
+        if entry.patch_urls:
+            self.append_has_commit(entry)
+        self.update_last_seen_date(entry)
+        return cve_entry
+
+    def list_yaml_cve_ids(self) -> list[str]:
+        """Return all CVE IDs for which a YAML file exists."""
+        return [p.stem for p in sorted(self.yaml_dir.glob("CVE-*.yaml"))]
+
+    def list_raw_cve_ids(self) -> list[str]:
+        """Return all CVE IDs for which a raw JSON file exists."""
+        return [p.stem for p in sorted(self.raw_dir.glob("CVE-*.json"))]
