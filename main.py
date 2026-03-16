@@ -231,7 +231,7 @@ def main() -> None:
     storage = CrawlStorage(data_dir=settings.data_dir)
 
     entries = step1_crawl_and_filter(settings, storage)
-    step2_calltrace(settings, entries, storage)
+    # step2_calltrace(settings, entries, storage)
 
 
 if __name__ == "__main__":
