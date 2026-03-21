@@ -12,6 +12,7 @@ is persisted in ``<data_dir>/.state.json`` by :class:`~aliyun_crawler.storage.Cr
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 import re
@@ -22,6 +23,9 @@ from typing import Generator, Iterator, Optional
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
+from playwright.async_api import BrowserContext as AsyncBrowserContext
+from playwright.async_api import Page as AsyncPage
+from playwright.async_api import async_playwright
 from playwright.sync_api import BrowserContext, Page, sync_playwright
 from playwright_stealth import Stealth
 
@@ -102,42 +106,164 @@ class AVDCrawler:
     def crawl(self) -> Generator[RawAVDEntry, None, None]:
         """Crawl CVE list pages and yield parsed :class:`RawAVDEntry` objects.
 
-        Stops early if:
-        - ``max_pages`` is reached, or
-        - an entry's ``modified_date`` is older than ``config.since`` (incremental mode).
+        Uses page-level concurrency while preserving ordered consumption:
+        - pages are fetched concurrently in windows of ``config.page_concurrency``;
+        - results are consumed in ascending page order so incremental ``since``
+          break semantics remain correct.
         """
-        with self._browser_context() as ctx:
-            self._page = ctx.new_page()
+        entries = asyncio.run(self._crawl_async())
+        for entry in entries:
+            yield entry
+
+    async def _crawl_async(self) -> list[RawAVDEntry]:
+        """Async implementation for concurrent page crawling.
+
+        Important: although pages are fetched concurrently, we process completed
+        pages in page-number order to ensure the first old entry (``since``)
+        triggers a deterministic global stop.
+        """
+        out: list[RawAVDEntry] = []
+        concurrency = max(1, getattr(self.config, "page_concurrency", 1))
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=self.config.headless,
+                args=_BROWSER_ARGS,
+            )
             try:
-                for page_num in range(1, self.config.max_pages + 1):
-                    entries, has_next = self._fetch_list_page(page_num)
-                    if not entries:
-                        logger.info("No entries on page %d — stopping.", page_num)
-                        break
+                ctx = await browser.new_context(
+                    user_agent=_USER_AGENT,
+                    viewport={"width": 1280, "height": 800},
+                    locale="zh-CN",
+                )
+                if hasattr(_STEALTH, "apply_stealth_async"):
+                    await _STEALTH.apply_stealth_async(ctx)  # type: ignore[attr-defined]
 
-                    stop_early = False
-                    for entry in entries:
-                        if (
-                            self._since
-                            and entry.modified_date
-                            and entry.modified_date <= self._since
-                        ):
-                            logger.info(
-                                "Entry %s modified at %s before since=%s — stopping.",
-                                entry.cve_id,
-                                entry.modified_date,
-                                self._since,
+                page_num = 1
+                stop_all = False
+                while page_num <= self.config.max_pages and not stop_all:
+                    window_pages = list(
+                        range(
+                            page_num,
+                            min(page_num + concurrency, self.config.max_pages + 1),
+                        )
+                    )
+                    tasks = [
+                        asyncio.create_task(self._fetch_page_bundle_async(ctx, pnum))
+                        for pnum in window_pages
+                    ]
+                    bundles = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    by_page: dict[int, tuple[list[RawAVDEntry], bool]] = {}
+                    for i, result in enumerate(bundles):
+                        pnum = window_pages[i]
+                        if isinstance(result, BaseException):
+                            logger.error(
+                                "Failed to fetch page %d bundle: %s", pnum, result
                             )
-                            stop_early = True
-                            break
-                        detail = self._fetch_detail(entry)
-                        yield detail
-                        self._sleep()
+                            by_page[pnum] = ([], False)
+                        else:
+                            by_page[pnum] = result
 
-                    if stop_early or not has_next:
-                        break
+                    for pnum in window_pages:
+                        entries, has_next = by_page[pnum]
+                        if not entries:
+                            logger.info("No entries on page %d — stopping.", pnum)
+                            stop_all = True
+                            break
+
+                        stop_page = False
+                        for entry in entries:
+                            if (
+                                self._since
+                                and entry.modified_date
+                                and entry.modified_date <= self._since
+                            ):
+                                logger.info(
+                                    "Entry %s modified at %s before since=%s — stopping.",
+                                    entry.cve_id,
+                                    entry.modified_date,
+                                    self._since,
+                                )
+                                stop_page = True
+                                stop_all = True
+                                break
+                            out.append(entry)
+
+                        if stop_page or not has_next:
+                            stop_all = True
+                            break
+
+                    page_num += concurrency
             finally:
-                self._page = None
+                await browser.close()
+
+        return out
+
+    async def _fetch_page_bundle_async(
+        self,
+        ctx: AsyncBrowserContext,
+        page_num: int,
+    ) -> tuple[list[RawAVDEntry], bool]:
+        """Fetch one list page and all its detail pages (same page number)."""
+        page = await ctx.new_page()
+        try:
+            entries, has_next = await self._fetch_list_page_async(page, page_num)
+            if not entries:
+                return [], has_next
+
+            detailed: list[RawAVDEntry] = []
+            for entry in entries:
+                detailed.append(await self._fetch_detail_async(page, entry))
+                await self._sleep_async()
+            return detailed, has_next
+        finally:
+            await page.close()
+
+    async def _sleep_async(self) -> None:
+        lo, hi = self.config.delay_range
+        delay = random.uniform(lo, hi)
+        logger.debug("Sleeping %.1fs between requests.", delay)
+        await asyncio.sleep(delay)
+
+    async def _render_async(self, page: AsyncPage, url: str) -> BeautifulSoup:
+        timeout_ms = int(self.config.timeout * 1000)
+        await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+        html = await page.content()
+        return BeautifulSoup(html, "html.parser")
+
+    async def _fetch_list_page_async(
+        self,
+        page: AsyncPage,
+        page_num: int,
+    ) -> tuple[list[RawAVDEntry], bool]:
+        url = f"{self.config.list_url}?page={page_num}&pageSize={self.config.page_size}"
+        try:
+            soup = await self._render_async(page, url)
+        except Exception as exc:
+            logger.error("Failed to fetch list page %d: %s", page_num, exc)
+            return [], False
+
+        entries = self._parse_list_page(soup)
+        has_next = self._has_next_page(soup)
+        logger.info(
+            "Page %d: %d entries, has_next=%s", page_num, len(entries), has_next
+        )
+        return entries, has_next
+
+    async def _fetch_detail_async(
+        self, page: AsyncPage, stub: RawAVDEntry
+    ) -> RawAVDEntry:
+        if not stub.detail_url:
+            stub.detail_url = self.config.detail_url_template.format(stub.cve_id)
+
+        try:
+            soup = await self._render_async(page, stub.detail_url)
+        except Exception as exc:
+            logger.error("Failed to fetch detail for %s: %s", stub.cve_id, exc)
+            return stub
+
+        return self._parse_detail_page(stub, soup)
 
     def fetch_single(self, cve_id: str) -> Optional[RawAVDEntry]:
         """Fetch and return a single CVE entry by ID."""
@@ -244,7 +370,9 @@ class AVDCrawler:
             href = link_tag.get("href", "")
             if not cve_id.startswith("CVE-"):
                 return None
-            detail_url = href if href.startswith("http") else urljoin(self.config.base_url, href)
+            detail_url = (
+                href if href.startswith("http") else urljoin(self.config.base_url, href)
+            )
 
             # Cell 1: vuln name
             title = cells[1].get_text(strip=True) if len(cells) > 1 else ""
@@ -299,7 +427,9 @@ class AVDCrawler:
             if not cve_match:
                 continue
             cve_id = cve_match.group(0)
-            detail_url = href if href.startswith("http") else urljoin(self.config.base_url, href)
+            detail_url = (
+                href if href.startswith("http") else urljoin(self.config.base_url, href)
+            )
             entries.append(RawAVDEntry(cve_id=cve_id, detail_url=detail_url))
         return entries
 
@@ -388,7 +518,9 @@ class AVDCrawler:
         # ---- CVSS numeric score ---------------------------------------------
         score_el = soup.find(
             "div",
-            class_=lambda c: c and "cvss-breakdown__score" in " ".join(c) if c else False,
+            class_=lambda c: (
+                c and "cvss-breakdown__score" in " ".join(c) if c else False
+            ),
         )
         if score_el and stub.cvss_score is None:
             try:
@@ -411,7 +543,9 @@ class AVDCrawler:
                             cwe_candidate = data_cells[0].get_text(strip=True)
                             if re.match(r"CWE-\d+", cwe_candidate):
                                 stub.cwe_id = cwe_candidate
-                                stub.cwe_description = data_cells[1].get_text(strip=True)
+                                stub.cwe_description = data_cells[1].get_text(
+                                    strip=True
+                                )
                     break
             else:
                 continue

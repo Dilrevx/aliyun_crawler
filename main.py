@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -22,7 +23,7 @@ from aliyun_crawler.commit_resolver import _COMMIT_RE, _ISSUE_RE, _PR_RE, Commit
 from aliyun_crawler.config import CrawlerSettings
 from aliyun_crawler.crawler import AVDCrawler
 from aliyun_crawler.filter import FilterPipeline
-from aliyun_crawler.models import AVDCveEntry
+from aliyun_crawler.models import AVDCveEntry, RawAVDEntry
 from aliyun_crawler.storage import CrawlStorage
 
 
@@ -49,27 +50,43 @@ def _setup_logging(log_dir: str | None) -> None:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Target CWE types – injection / deserialization / RCE families
+# Target CWE types – logic vulnerability focus
 # ---------------------------------------------------------------------------
 
 _TARGET_CWES: set[str] = {
-    "CWE-79",  # Cross-site Scripting
-    "CWE-89",  # SQL Injection
-    "CWE-77",  # Command Injection
-    "CWE-78",  # OS Command Injection
-    "CWE-94",  # Code Injection
-    "CWE-502",  # Deserialization of Untrusted Data
-    "CWE-22",  # Path Traversal
-    "CWE-611",  # XML External Entity (XXE)
-    "CWE-918",  # Server-Side Request Forgery
-    "CWE-917",  # Expression Language Injection
-    "CWE-74",  # Injection (generic)
     "CWE-284",  # Improper Access Control
     "CWE-285",  # Improper Authorization
     "CWE-862",  # Missing Authorization
     "CWE-863",  # Incorrect Authorization
     "CWE-639",  # IDOR / User-Controlled Key Access
+    # Non-logic families (temporarily disabled)
+    # "CWE-79",   # Cross-site Scripting
+    # "CWE-89",   # SQL Injection
+    # "CWE-77",   # Command Injection
+    # "CWE-78",   # OS Command Injection
+    # "CWE-94",   # Code Injection
+    # "CWE-502",  # Deserialization of Untrusted Data
+    # "CWE-22",   # Path Traversal
+    # "CWE-611",  # XML External Entity (XXE)
+    # "CWE-918",  # Server-Side Request Forgery
+    # "CWE-917",  # Expression Language Injection
+    # "CWE-74",   # Injection (generic)
 }
+
+_LOGIC_KEYWORDS: tuple[str, ...] = (
+    "broken access control",
+    "improper access control",
+    "improper authorization",
+    "missing authorization",
+    "idor",
+    "insecure direct object reference",
+    "越权",
+    "权限绕过",
+    "未授权",
+    "访问控制",
+)
+
+_STEP1_DELAY_RANGE_OVERRIDE: tuple[float, float] | None = (0.2, 0.8)
 
 
 def _extract_repo_url(patch_url: str) -> Optional[str]:
@@ -79,6 +96,26 @@ def _extract_repo_url(patch_url: str) -> Optional[str]:
         if m:
             return f"https://github.com/{m.group(1)}/{m.group(2)}"
     return None
+
+
+def _is_logic_vulnerability(entry: RawAVDEntry) -> bool:
+    """Heuristic for logic vulnerabilities.
+
+    Not equivalent to pure CWE filtering:
+    - CWE match is high precision but may miss entries with noisy/missing CWE tags.
+    - Keyword match improves recall but may include some false positives.
+    """
+    if entry.cwe_id in _TARGET_CWES:
+        return True
+
+    text = " ".join(
+        [
+            entry.title or "",
+            entry.description or "",
+            entry.cwe_description or "",
+        ]
+    ).lower()
+    return any(keyword in text for keyword in _LOGIC_KEYWORDS)
 
 
 # ---------------------------------------------------------------------------
@@ -96,9 +133,14 @@ def step1_crawl_to_raw(
         CVE IDs crawled in the current run.
     """
     config = settings.to_crawl_config()
+    if _STEP1_DELAY_RANGE_OVERRIDE is not None:
+        config.delay_range = _STEP1_DELAY_RANGE_OVERRIDE
+        logger.info("Step 1 speed tuning: delay_range=%s", config.delay_range)
+
     crawler = AVDCrawler(config)
 
     crawled_cves: list[str] = []
+    started = time.perf_counter()
     logger.info("=== Step 1 – crawl raw (max_pages=%d) ===", config.max_pages)
 
     for raw in crawler.crawl():
@@ -106,7 +148,13 @@ def step1_crawl_to_raw(
         storage.update_last_seen_date(raw)
         crawled_cves.append(raw.cve_id)
 
-    logger.info("Step 1 complete – %d raw entries persisted", len(crawled_cves))
+    elapsed = max(time.perf_counter() - started, 1e-6)
+    logger.info(
+        "Step 1 complete – %d raw entries persisted in %.1fs (%.2f entries/s)",
+        len(crawled_cves),
+        elapsed,
+        len(crawled_cves) / elapsed,
+    )
     return crawled_cves
 
 
@@ -127,12 +175,12 @@ def step2_filter_raw_to_yaml(
     """Filter raw entries and persist accepted results to YAML.
 
     Filters applied (AND logic):
-    - CWE must be in *_TARGET_CWES*
+    - Entry matches logic-vuln heuristic (CWE set + keyword backstop)
     - At least one GitHub commit / PR / issue URL must be present
     """
     pipeline = (
         FilterPipeline()
-        .require(lambda e: e.cwe_id in _TARGET_CWES, name="require_target_cwe")
+        .require(_is_logic_vulnerability, name="require_logic_vuln")
         .require_patch_url()
     )
 

@@ -30,6 +30,7 @@ class CrawlConfig:
     # ---- Pagination ----------------------------------------------------------
     max_pages: int = 100
     page_size: int = 30
+    page_concurrency: int = 4
 
     # ---- HTTP behaviour ------------------------------------------------------
     delay_range: tuple[float, float] = (1.0, 3.0)
@@ -70,7 +71,7 @@ class CrawlerSettings(BaseSettings):
         DATA_DIR=./output/aliyun_cve
         SINCE=2024-01-01
         LLM__API_KEY=sk-...
-        LLM__MODEL=gpt-4o
+        LLM__MODEL=deepseek-v3.2
         LLM__BASE_URL=https://your-proxy/v1   # optional
     """
 
@@ -80,6 +81,7 @@ class CrawlerSettings(BaseSettings):
 
     max_pages: int = 100
     page_size: int = 30
+    page_concurrency: int = 4
     delay_range: tuple[float, float] = (1.0, 3.0)
     timeout: int = 30
 
@@ -100,7 +102,7 @@ class CrawlerSettings(BaseSettings):
 
     # LLM settings (re-uses the route-hacker LLM__ variables)
     llm_provider: str = Field(default="openai", alias="LLM__PROVIDER")
-    llm_model: str = Field(default="gpt-4o", alias="LLM__MODEL")
+    llm_model: str = Field(default="deepseek-v3.2", alias="LLM__MODEL")
     llm_api_key: Optional[str] = Field(default=None, alias="LLM__API_KEY")
     llm_base_url: Optional[str] = Field(default=None, alias="LLM__BASE_URL")
 
@@ -146,6 +148,7 @@ class CrawlerSettings(BaseSettings):
             detail_url_template=self.detail_url_template,
             max_pages=self.max_pages,
             page_size=self.page_size,
+            page_concurrency=self.page_concurrency,
             delay_range=self.delay_range,
             timeout=self.timeout,
             headless=self.headless,

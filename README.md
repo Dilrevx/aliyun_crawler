@@ -1,11 +1,11 @@
 # aliyun-crawler
 
-从 [avd.aliyun.com](https://avd.aliyun.com) 爬取 CVE 漏洞数据，按注入类 CWE 筛选并保留有 GitHub Patch URL 的条目，然后用 LLM 标注从 HTTP 入口到漏洞触发点的调用链（calltrace）。
+从 [avd.aliyun.com](https://avd.aliyun.com) 爬取 CVE 漏洞数据，当前默认只筛选**逻辑漏洞（访问控制/授权相关）**并保留有 GitHub Patch URL 的条目，然后可选用 LLM 标注从 HTTP 入口到漏洞触发点的调用链（calltrace）。
 
 ## 目录结构
 
 ```
-main.py                  # 入口，两个主步骤
+main.py                  # 入口，三个主步骤 + 本地开关
 src/aliyun_crawler/
   config.py              # 配置（从 .env 读取）
   crawler.py             # Playwright 爬虫
@@ -32,21 +32,30 @@ uv run playwright install chromium
 cp .env.example .env
 ```
 
-然后编辑 `.env`，**至少填写** `LLM__API_KEY`；其余可保持默认：
+然后编辑 `.env`，**至少填写** `LLM__API_KEY`。建议先关注关键变量，其它保持默认即可。
+
+### 关键变量
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `MAX_PAGES` | 爬取列表页数（每页 30 条），建议先用 3–5 测试 | `100` |
-| `SINCE` | 只爬取该日期之后修改的条目（增量模式） | 不限制 |
+| `LLM__API_KEY` | OpenAI 兼容接口密钥（必填） | — |
+| `MAX_PAGES` | 爬取列表页数（每页 30 条） | `100` |
+| `PAGE_CONCURRENCY` | Step1 按页并发窗口大小 | `4` |
+| `SINCE` | 增量阈值（仅抓取该日期之后修改的条目） | 不限制 |
 | `DATA_DIR` | 输出目录 | `./output/aliyun_cve` |
+
+### 其他变量
+
+| 变量 | 说明 | 默认值 |
+|---|---|---|
 | `GITHUB_TOKEN` | GitHub PAT，避免 API 速率限制 | 无认证 |
-| `LLM__API_KEY` | OpenAI 兼容接口的密钥 **（必填）** | — |
-| `LLM__MODEL` | 模型名称 | `gpt-4o` |
+| `LLM__MODEL` | 模型名称 | `deepseek-v3.2` |
 | `LLM__BASE_URL` | 自定义 API 地址（代理 / 本地模型） | OpenAI 官方 |
-| `GIT_PROXY` | git 操作的代理，如 `socks5://127.0.0.1:1080` | 无 |
+| `GIT_PROXY` | git 代理，如 `socks5://127.0.0.1:1080` | 无 |
 | `GIT_CLONE_VIA_SSH` | 使用 SSH 克隆（需加载 SSH key） | `false` |
-| `CALLTRACE_CONCURRENCY` | 并行处理的 CVE 数量 | `5` |
+| `CALLTRACE_CONCURRENCY` | Step3 并行处理的 CVE 数量 | `5` |
 | `CALLTRACE_MAX_ROUNDS` | 每个 CVE 最多 LLM 对话轮数 | `4` |
+| `LOG_DIR` | 日志目录（按时间命名） | 关闭（仅终端） |
 
 ### 3. 运行
 
@@ -54,19 +63,25 @@ cp .env.example .env
 uv run python main.py
 ```
 
-## 运行流程
+## 运行流程（重构后）
 
-### Step 1 – 爬取 + 过滤
+### Step 1 – 仅爬取 RAW
 
 - 用 Playwright（无头 Chromium + playwright-stealth 绕过 WAF）爬取列表页与详情页
-- 过滤条件（AND 逻辑）：
-  - CWE 属于注入 / 反序列化 / RCE 类型（CWE-79 / CWE-89 / CWE-78 / CWE-94 / CWE-502 / CWE-22 / CWE-611 / CWE-918 / CWE-917 / CWE-74 等）
-  - 至少有一个可解析的 GitHub commit / PR / Issue URL
-- 接受的条目写入：
-  - `<DATA_DIR>/raw/<CVE-ID>.json`（原始数据）
-  - `<DATA_DIR>/yaml/<CVE-ID>.yaml`（初始 YAML，calltrace 字段为空）
+- 按页并发抓取（窗口大小由 `PAGE_CONCURRENCY` 控制，默认 `4`）
+- 虽然抓取并发，但结果按页序消费，确保 `since` 旧数据截断与 break 语义正确
+- 不做业务筛选，直接写入 `<DATA_DIR>/raw/<CVE-ID>.json`
 
-### Step 2 – LLM calltrace 标注
+### Step 2 – RAW → YAML 过滤
+
+- 过滤条件（AND 逻辑）：
+  - 命中“逻辑漏洞启发式”：
+    - 主条件：CWE ∈ {`CWE-284`, `CWE-285`, `CWE-862`, `CWE-863`, `CWE-639`}
+    - 补充条件：标题/描述中命中访问控制关键词（用于补漏）
+  - 至少有一个可解析的 GitHub commit / PR / Issue URL
+- 命中的条目写入 `<DATA_DIR>/yaml/<CVE-ID>.yaml`（初始 YAML，calltrace 字段为空）
+
+### Step 3 – LLM calltrace 标注（可选）
 
 - 通过 GitHub API 将 patch URL（commit / PR / Issue）解析为具体 commit SHA
 - 克隆（或复用缓存的）仓库，切到漏洞版本（patch commit 的父提交）
@@ -75,6 +90,29 @@ uv run python main.py
   - 若 entry point 和 patch 不在同一文件，LLM 可在每轮请求更多源文件
   - 达到 `CALLTRACE_MAX_ROUNDS` 后强制要求给出最终答案
 - 结果写回 `<DATA_DIR>/yaml/<CVE-ID>.yaml`，填充 `CallTrace`、`patch_method_before/after`、`source`、`sink`、`reason` 字段
+
+### main 内开关
+
+在 `main()` 中直接控制，不新增 `.env` 开关：
+
+- `run_step1_crawl_raw`
+- `run_step2_filter_yaml`
+- `run_step3_calltrace`
+
+当 Step1 关闭但 Step2 打开时，Step2 会自动读取现有 raw 文件继续处理。
+
+## 过滤机制反思（充分/必要/等价）
+
+- **CWE 过滤不是“逻辑漏洞”的充要条件，也不等价**。
+- 仅用 CWE 做主判定，精度较高，但会漏掉 CWE 标注缺失或标注不稳定的条目（非必要）。
+- 仅用关键词做判定，召回更高，但会引入噪声（非充分）。
+- 当前采用“CWE 主判定 + 关键词补漏 + patch_url 约束”的折中策略，实际效果通常比单一条件更稳。
+
+## 并发与性能现状
+
+- Step1（爬虫）是主要瓶颈：已改为按页并发窗口抓取，但仍保留每条详情请求的随机延迟（抗封禁）。
+- Step3（LLM 标注）支持并发，受 `CALLTRACE_CONCURRENCY` 控制。
+- 已在 Step1 增加运行统计日志（总耗时与 entries/s），并在代码里提供了本地延迟覆盖（`_STEP1_DELAY_RANGE_OVERRIDE`）用于加速测试。
 
 ## 日志
 

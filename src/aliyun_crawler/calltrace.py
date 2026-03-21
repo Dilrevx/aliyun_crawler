@@ -23,7 +23,7 @@ than a Python Git library to keep dependencies minimal.
 Environment / config keys (read from ``.env``)::
 
     LLM__PROVIDER=openai
-    LLM__MODEL=gpt-4o
+    LLM__MODEL=deepseek-v3.2
     LLM__API_KEY=sk-...
     LLM__BASE_URL=https://api.openai.com/v1        # optional
     CRAWL__REPOS_DIR=./data/repos                  # where clones are stored
@@ -96,7 +96,7 @@ class _AsyncLLMClient:
 
     def __init__(
         self,
-        model: str = "gpt-4o",
+        model: str = "deepseek-v3.2",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
     ) -> None:
@@ -111,7 +111,9 @@ class _AsyncLLMClient:
                 kwargs["base_url"] = base_url
             self._client = AsyncOpenAI(**kwargs)
         except ImportError:
-            logger.error("openai package not installed. Calltrace exploration unavailable.")
+            logger.error(
+                "openai package not installed. Calltrace exploration unavailable."
+            )
             self._client = None
 
     async def chat(
@@ -193,7 +195,9 @@ def _clone_or_update(
 
     if local_path.exists():
         logger.info("Repo already cloned at %s; fetching…", local_path)
-        _run_git(["fetch", "--all", "--prune"], cwd=local_path, check=False, proxy=git_proxy)
+        _run_git(
+            ["fetch", "--all", "--prune"], cwd=local_path, check=False, proxy=git_proxy
+        )
     else:
         logger.info("Cloning %s → %s", effective_url, local_path)
         repos_dir.mkdir(parents=True, exist_ok=True)
@@ -377,7 +381,8 @@ def _build_user_prompt(
     file_contents: dict[str, str],
 ) -> str:
     file_sections = "\n\n".join(
-        f"### FILE: {path}\n```\n{content[:8000]}\n```" for path, content in file_contents.items()
+        f"### FILE: {path}\n```\n{content[:8000]}\n```"
+        for path, content in file_contents.items()
     )
     return f"""\
 CVE: {entry.CVE}
@@ -446,7 +451,7 @@ class CalltraceExplorer:
         self,
         repos_dir: str = "./data/repos",
         llm_provider: str = "openai",
-        llm_model: str = "gpt-4o",
+        llm_model: str = "deepseek-v3.2",
         llm_api_key: Optional[str] = None,
         llm_base_url: Optional[str] = None,
         clone_via_ssh: bool = False,
@@ -511,7 +516,9 @@ class CalltraceExplorer:
                 return entry, TokenStats(cve_id=entry.CVE)
 
             # Checkout vulnerable (pre-patch) version
-            parent = await asyncio.to_thread(_get_parent_commit, repo_path, patch_commit)
+            parent = await asyncio.to_thread(
+                _get_parent_commit, repo_path, patch_commit
+            )
             if parent:
                 try:
                     await asyncio.to_thread(_checkout, repo_path, parent)
@@ -534,7 +541,9 @@ class CalltraceExplorer:
             initial_files = {
                 f: _file_content(repo_path, f)
                 for f in patched_files
-                if f.endswith((".java", ".py", ".js", ".ts", ".go", ".php", ".rb", ".kt", ".cs"))
+                if f.endswith(
+                    (".java", ".py", ".js", ".ts", ".go", ".php", ".rb", ".kt", ".cs")
+                )
             }
 
             # Multi-turn LLM exploration.  The repo lock is held throughout so
@@ -663,7 +672,9 @@ class CalltraceExplorer:
             try:
                 response_text, p_tok, c_tok = await self._llm.chat(messages)
             except Exception as exc:
-                logger.error("[%s] LLM call failed (round %d): %s", entry.CVE, round_num + 1, exc)
+                logger.error(
+                    "[%s] LLM call failed (round %d): %s", entry.CVE, round_num + 1, exc
+                )
                 break
 
             stats.rounds += 1
@@ -678,7 +689,9 @@ class CalltraceExplorer:
 
             if parsed is not None:
                 final_result = parsed
-                logger.debug("[%s] Calltrace finalised in %d round(s)", entry.CVE, round_num + 1)
+                logger.debug(
+                    "[%s] Calltrace finalised in %d round(s)", entry.CVE, round_num + 1
+                )
                 break
 
             if files_needed is None:
@@ -718,7 +731,9 @@ class CalltraceExplorer:
             loaded: dict[str, str] = {}
             for fpath in files_needed[:10]:  # cap at 10 files per round
                 content = _file_content(repo_path, fpath)
-                loaded[fpath] = content if content else f"# File not found in repo: {fpath}"
+                loaded[fpath] = (
+                    content if content else f"# File not found in repo: {fpath}"
+                )
 
             followup_content = (
                 "\n\n".join(
