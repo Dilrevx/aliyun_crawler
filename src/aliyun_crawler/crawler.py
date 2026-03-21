@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
 import time
@@ -64,6 +65,10 @@ _USER_AGENT = (
 )
 
 
+class ListPageFetchError(RuntimeError):
+    """Raised when a list page cannot be fetched/rendered."""
+
+
 def _parse_date(text: str) -> Optional[datetime]:
     text = text.strip()
     for fmt in _DATE_FORMATS:
@@ -77,6 +82,20 @@ def _parse_date(text: str) -> Optional[datetime]:
 def _extract_patch_urls(urls: list[str]) -> list[str]:
     """Return only URLs that look like GitHub commit / PR / issue links."""
     return [u for u in urls if _GITHUB_ANY_RE.search(u)]
+
+
+def _proxy_env_snapshot() -> dict[str, str]:
+    keys = (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    )
+    return {k: os.environ.get(k, "") for k in keys if os.environ.get(k)}
 
 
 class AVDCrawler:
@@ -153,6 +172,16 @@ class AVDCrawler:
                         for pnum in window_pages
                     ]
                     bundles = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    if page_num == 1 and all(
+                        isinstance(item, ListPageFetchError) for item in bundles
+                    ):
+                        detail = " | ".join(str(item) for item in bundles)
+                        raise RuntimeError(
+                            "All initial list page requests failed. "
+                            f"Likely browser-network issue (proxy/egress/WAF). details={detail}; "
+                            f"proxy_env={_proxy_env_snapshot()}"
+                        )
 
                     by_page: dict[int, tuple[list[RawAVDEntry], bool]] = {}
                     for i, result in enumerate(bundles):
@@ -242,7 +271,7 @@ class AVDCrawler:
             soup = await self._render_async(page, url)
         except Exception as exc:
             logger.error("Failed to fetch list page %d: %s", page_num, exc)
-            return [], False
+            raise ListPageFetchError(f"page={page_num} url={url} err={exc}") from exc
 
         entries = self._parse_list_page(soup)
         has_next = self._has_next_page(soup)
