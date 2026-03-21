@@ -1,12 +1,8 @@
 """Main entry point.
 
-Step 1 – Crawl avd.aliyun.com, filter by injection/deserialization CWE types,
-         and keep only entries with resolvable GitHub patch URLs.
-Step 2 – For each accepted entry, resolve the patch commit, clone the repo, and
-         run a multi-turn LLM conversation to annotate the call-trace from the
-         HTTP entry point down to the vulnerable/patched method.
-         If the entry-point and the patch site are in different files the LLM
-         will request those files incrementally across turns.
+Step 1 – Crawl avd.aliyun.com and persist RAW entries only.
+Step 2 – Filter RAW entries (CWE + patch-url) and emit YAML entries.
+Step 3 – For accepted YAML entries, resolve patch commits and annotate calltrace.
 
 Configuration is read from a ``.env`` file (or real env vars); see
 ``.env.example`` for available keys.
@@ -68,6 +64,11 @@ _TARGET_CWES: set[str] = {
     "CWE-918",  # Server-Side Request Forgery
     "CWE-917",  # Expression Language Injection
     "CWE-74",  # Injection (generic)
+    "CWE-284",  # Improper Access Control
+    "CWE-285",  # Improper Authorization
+    "CWE-862",  # Missing Authorization
+    "CWE-863",  # Incorrect Authorization
+    "CWE-639",  # IDOR / User-Controlled Key Access
 }
 
 
@@ -81,35 +82,68 @@ def _extract_repo_url(patch_url: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Step 1 – crawl + filter
+# Step 1 – crawl raw only
 # ---------------------------------------------------------------------------
 
 
-def step1_crawl_and_filter(
+def step1_crawl_to_raw(
     settings: CrawlerSettings,
     storage: CrawlStorage,
+) -> list[str]:
+    """Crawl avd.aliyun.com and persist RAW entries only.
+
+    Returns:
+        CVE IDs crawled in the current run.
+    """
+    config = settings.to_crawl_config()
+    crawler = AVDCrawler(config)
+
+    crawled_cves: list[str] = []
+    logger.info("=== Step 1 – crawl raw (max_pages=%d) ===", config.max_pages)
+
+    for raw in crawler.crawl():
+        storage.save_raw(raw)
+        storage.update_last_seen_date(raw)
+        crawled_cves.append(raw.cve_id)
+
+    logger.info("Step 1 complete – %d raw entries persisted", len(crawled_cves))
+    return crawled_cves
+
+
+# ---------------------------------------------------------------------------
+# Step 2 – filter raw to yaml
+# ---------------------------------------------------------------------------
+
+
+def _list_raw_cve_ids(storage: CrawlStorage) -> list[str]:
+    """List all CVE IDs present in raw storage."""
+    return sorted(p.stem for p in storage.raw_dir.glob("CVE-*.json"))
+
+
+def step2_filter_raw_to_yaml(
+    storage: CrawlStorage,
+    cve_ids: list[str],
 ) -> list[AVDCveEntry]:
-    """Crawl avd.aliyun.com and return filtered entries with patch URLs.
+    """Filter raw entries and persist accepted results to YAML.
 
     Filters applied (AND logic):
     - CWE must be in *_TARGET_CWES*
     - At least one GitHub commit / PR / issue URL must be present
     """
-    config = settings.to_crawl_config()
-    crawler = AVDCrawler(config)
-
     pipeline = (
         FilterPipeline()
         .require(lambda e: e.cwe_id in _TARGET_CWES, name="require_target_cwe")
         .require_patch_url()
     )
 
-    entries: list[AVDCveEntry] = []
-    logger.info("=== Step 1 – crawl (max_pages=%d) ===", config.max_pages)
+    dedup_cve_ids = list(dict.fromkeys(cve_ids))
+    logger.info("=== Step 2 – filter raw to yaml (cves=%d) ===", len(dedup_cve_ids))
 
-    for raw in crawler.crawl():
-        storage.save_raw(raw)
-        storage.update_last_seen_date(raw)
+    entries: list[AVDCveEntry] = []
+    for cve_id in dedup_cve_ids:
+        raw = storage.load_raw(cve_id)
+        if raw is None:
+            continue
 
         if pipeline.passes(raw):
             entry = AVDCveEntry.from_raw(raw)
@@ -124,12 +158,16 @@ def step1_crawl_and_filter(
         else:
             logger.debug("filtered  %s  cwe=%s", raw.cve_id, raw.cwe_id)
 
-    logger.info("Step 1 complete – %d entries accepted", len(entries))
+    logger.info(
+        "Step 2 complete – %d entries accepted from %d raw entries",
+        len(entries),
+        len(dedup_cve_ids),
+    )
     return entries
 
 
 # ---------------------------------------------------------------------------
-# Step 2 – LLM calltrace annotation
+# Step 3 – LLM calltrace annotation
 # ---------------------------------------------------------------------------
 
 
@@ -165,7 +203,7 @@ def _build_targets(
     return targets
 
 
-def step2_calltrace(
+def step3_calltrace(
     settings: CrawlerSettings,
     entries: list[AVDCveEntry],
     storage: CrawlStorage,
@@ -180,7 +218,7 @@ def step2_calltrace(
         logger.info("No entries – skipping LLM annotation.")
         return
 
-    logger.info("=== Step 2 – resolving patch commits for %d entries ===", len(entries))
+    logger.info("=== Step 3 – resolving patch commits for %d entries ===", len(entries))
     targets = _build_targets(entries, settings.github_token)
 
     if not targets:
@@ -208,7 +246,7 @@ def step2_calltrace(
         )
 
     logger.info(
-        "=== Step 2 – LLM annotation (%d targets, concurrency=%d) ===",
+        "=== Step 3 – LLM annotation (%d targets, concurrency=%d) ===",
         len(targets),
         settings.calltrace_concurrency,
     )
@@ -222,7 +260,7 @@ def step2_calltrace(
 
     total = explorer.total_stats()
     logger.info(
-        "Step 2 complete – %d entries annotated  total_tokens=%d",
+        "Step 3 complete – %d entries annotated  total_tokens=%d",
         len(enriched),
         total.total_tokens,
     )
@@ -238,8 +276,32 @@ def main() -> None:
     _setup_logging(settings.log_dir)
     storage = CrawlStorage(data_dir=settings.data_dir)
 
-    entries = step1_crawl_and_filter(settings, storage)
-    # step2_calltrace(settings, entries, storage)
+    run_step1_crawl_raw = True
+    run_step2_filter_yaml = True
+    run_step3_calltrace = False
+
+    crawled_cves: list[str] = []
+    if run_step1_crawl_raw:
+        crawled_cves = step1_crawl_to_raw(settings, storage)
+    else:
+        logger.info("Step 1 skipped (run_step1_crawl_raw=False)")
+
+    entries: list[AVDCveEntry] = []
+    if run_step2_filter_yaml:
+        if not crawled_cves:
+            crawled_cves = _list_raw_cve_ids(storage)
+            logger.info(
+                "Step 2 uses existing raw files (count=%d)",
+                len(crawled_cves),
+            )
+        entries = step2_filter_raw_to_yaml(storage, crawled_cves)
+    else:
+        logger.info("Step 2 skipped (run_step2_filter_yaml=False)")
+
+    if run_step3_calltrace:
+        step3_calltrace(settings, entries, storage)
+    else:
+        logger.info("Step 3 skipped (run_step3_calltrace=False)")
 
 
 if __name__ == "__main__":
