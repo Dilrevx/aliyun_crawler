@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 _STATE_FILE = ".state.json"
 _HAS_COMMIT_FILE = "has_commit.jsonl"
+_STATE_VERSION = 2
 
 
 class CrawlStorage:
@@ -68,15 +69,128 @@ class CrawlStorage:
     # Incremental-crawl state
     # ------------------------------------------------------------------
 
+    def _now_iso(self) -> str:
+        return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _new_state(self) -> dict[str, Any]:
+        now = self._now_iso()
+        return {
+            "version": _STATE_VERSION,
+            "schema": "crawl-state-v2",
+            "updated_at": now,
+            "stage1": {
+                "incremental": {
+                    "last_seen_date": None,
+                    "last_seen_cve": None,
+                },
+                "last_run": {
+                    "run_started_at": None,
+                    "run_finished_at": None,
+                    "status": "idle",
+                    "max_pages": None,
+                    "page_concurrency": None,
+                    "raw_saved": 0,
+                },
+                "totals": {
+                    "runs": 0,
+                    "raw_saved": 0,
+                },
+            },
+            "stage2": {
+                "last_run": {
+                    "run_started_at": None,
+                    "run_finished_at": None,
+                    "status": "idle",
+                    "mode": "raw_snapshot",
+                    "input_raw_count": 0,
+                    "accepted_yaml_count": 0,
+                    "rejected_raw_count": 0,
+                },
+                "totals": {
+                    "runs": 0,
+                    "accepted_yaml_count": 0,
+                },
+            },
+            "stage3": {
+                "last_run": {
+                    "run_started_at": None,
+                    "run_finished_at": None,
+                    "status": "idle",
+                    "target_count": 0,
+                    "annotated_count": 0,
+                    "partial": False,
+                },
+                "totals": {
+                    "runs": 0,
+                    "annotated_count": 0,
+                },
+            },
+        }
+
+    def _backup_legacy_state(self, legacy_state: dict[str, Any]) -> Path:
+        ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+        backup = self.root / f".state.legacy-{ts}.json"
+        backup.write_text(
+            json.dumps(legacy_state, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return backup
+
+    def _ensure_state_shape(self, state: dict[str, Any]) -> dict[str, Any]:
+        base = self._new_state()
+
+        def _merge(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
+            for key, value in src.items():
+                if (
+                    key in dst
+                    and isinstance(dst[key], dict)
+                    and isinstance(value, dict)
+                ):
+                    _merge(dst[key], value)
+                else:
+                    dst[key] = value
+            return dst
+
+        merged = _merge(base, state)
+        merged["version"] = _STATE_VERSION
+        merged["schema"] = "crawl-state-v2"
+        merged["updated_at"] = self._now_iso()
+        return merged
+
+    def _migrate_if_needed(self, state: dict[str, Any]) -> dict[str, Any]:
+        if state.get("version") == _STATE_VERSION and "stage1" in state:
+            return self._ensure_state_shape(state)
+
+        legacy_like = bool(state) and "stage1" not in state
+        if legacy_like:
+            backup = self._backup_legacy_state(state)
+            logger.info("Backed up legacy state to %s", backup)
+            migrated = self._new_state()
+            migrated["stage1"]["incremental"]["last_seen_date"] = state.get(
+                "last_seen_date"
+            )
+            migrated["stage1"]["incremental"]["last_seen_cve"] = state.get(
+                "last_seen_cve"
+            )
+            migrated["legacy_snapshot"] = state
+            self.save_state(migrated)
+            logger.info("Migrated state file to v2 schema")
+            return migrated
+
+        fresh = self._new_state()
+        self.save_state(fresh)
+        return fresh
+
     def load_state(self) -> dict[str, Any]:
         """Load the persisted crawl state dict."""
         path = self.root / _STATE_FILE
         if path.exists():
             try:
-                return json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return self._migrate_if_needed(data)
             except (json.JSONDecodeError, OSError) as exc:
                 logger.warning("Could not load state file: %s", exc)
-        return {}
+        return self._migrate_if_needed({})
 
     def save_state(self, state: dict[str, Any]) -> None:
         """Persist the crawl state dict."""
@@ -85,21 +199,88 @@ class CrawlStorage:
 
     def get_last_seen_date(self) -> Optional[str]:
         """Return the ISO date string of the most recently crawled entry, or None."""
-        return self.load_state().get("last_seen_date")
+        state = self.load_state()
+        return state.get("stage1", {}).get("incremental", {}).get("last_seen_date")
+
+    def mark_stage1_start(self, *, max_pages: int, page_concurrency: int) -> None:
+        state = self.load_state()
+        now = self._now_iso()
+        stage = state["stage1"]["last_run"]
+        stage.update(
+            {
+                "run_started_at": now,
+                "run_finished_at": None,
+                "status": "running",
+                "max_pages": max_pages,
+                "page_concurrency": page_concurrency,
+                "raw_saved": 0,
+            }
+        )
+        state["updated_at"] = now
+        self.save_state(state)
+
+    def mark_stage1_end(self, *, status: str = "completed") -> None:
+        state = self.load_state()
+        now = self._now_iso()
+        stage = state["stage1"]["last_run"]
+        stage["run_finished_at"] = now
+        stage["status"] = status
+        state["stage1"]["totals"]["runs"] += 1
+        state["updated_at"] = now
+        self.save_state(state)
+
+    def mark_stage2_summary(
+        self, *, input_raw_count: int, accepted_yaml_count: int
+    ) -> None:
+        state = self.load_state()
+        now = self._now_iso()
+        state["stage2"]["last_run"] = {
+            "run_started_at": now,
+            "run_finished_at": now,
+            "status": "completed",
+            "mode": "raw_snapshot",
+            "input_raw_count": input_raw_count,
+            "accepted_yaml_count": accepted_yaml_count,
+            "rejected_raw_count": max(0, input_raw_count - accepted_yaml_count),
+        }
+        state["stage2"]["totals"]["runs"] += 1
+        state["stage2"]["totals"]["accepted_yaml_count"] += accepted_yaml_count
+        state["updated_at"] = now
+        self.save_state(state)
+
+    def mark_stage3_summary(self, *, target_count: int, annotated_count: int) -> None:
+        state = self.load_state()
+        now = self._now_iso()
+        partial = annotated_count < target_count
+        state["stage3"]["last_run"] = {
+            "run_started_at": now,
+            "run_finished_at": now,
+            "status": "completed",
+            "target_count": target_count,
+            "annotated_count": annotated_count,
+            "partial": partial,
+        }
+        state["stage3"]["totals"]["runs"] += 1
+        state["stage3"]["totals"]["annotated_count"] += annotated_count
+        state["updated_at"] = now
+        self.save_state(state)
 
     def update_last_seen_date(self, entry: RawAVDEntry) -> None:
-        """Update the state file with the modified date of *entry* if it is newer."""
+        """Update stage1 incremental bookmark and counters for a saved raw entry."""
         ref_date = entry.modified_date or entry.crawled_at
         if ref_date is None:
             return
         state = self.load_state()
-        current = state.get("last_seen_date")
+        current = state["stage1"]["incremental"].get("last_seen_date")
         new_val = ref_date.strftime("%Y-%m-%dT%H:%M:%SZ")
         if current is None or new_val > current:
-            state["last_seen_date"] = new_val
-            state["last_seen_cve"] = entry.cve_id
-            state["updated_at"] = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            self.save_state(state)
+            state["stage1"]["incremental"]["last_seen_date"] = new_val
+            state["stage1"]["incremental"]["last_seen_cve"] = entry.cve_id
+
+        state["stage1"]["last_run"]["raw_saved"] += 1
+        state["stage1"]["totals"]["raw_saved"] += 1
+        state["updated_at"] = self._now_iso()
+        self.save_state(state)
 
     # ------------------------------------------------------------------
     # Raw entry persistence
@@ -141,7 +322,9 @@ class CrawlStorage:
         path = self.yaml_dir / f"{entry.CVE}.yaml"
         doc = entry.to_yaml_dict()
         path.write_text(
-            yaml.dump(doc, allow_unicode=True, default_flow_style=False, sort_keys=False),
+            yaml.dump(
+                doc, allow_unicode=True, default_flow_style=False, sort_keys=False
+            ),
             encoding="utf-8",
         )
         logger.debug("Saved YAML entry: %s", path)
@@ -181,7 +364,9 @@ class CrawlStorage:
             "cvss_score": entry.cvss_score,
             "cwe_id": entry.cwe_id,
             "modified_date": (
-                entry.modified_date.strftime("%Y-%m-%d") if entry.modified_date else None
+                entry.modified_date.strftime("%Y-%m-%d")
+                if entry.modified_date
+                else None
             ),
         }
         with path.open("a", encoding="utf-8") as fh:

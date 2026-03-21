@@ -137,16 +137,25 @@ def step1_crawl_to_raw(
         config.delay_range = _STEP1_DELAY_RANGE_OVERRIDE
         logger.info("Step 1 speed tuning: delay_range=%s", config.delay_range)
 
+    storage.mark_stage1_start(
+        max_pages=config.max_pages,
+        page_concurrency=config.page_concurrency,
+    )
+
     crawler = AVDCrawler(config)
 
     crawled_cves: list[str] = []
     started = time.perf_counter()
     logger.info("=== Step 1 – crawl raw (max_pages=%d) ===", config.max_pages)
 
-    for raw in crawler.crawl():
-        storage.save_raw(raw)
-        storage.update_last_seen_date(raw)
-        crawled_cves.append(raw.cve_id)
+    try:
+        for raw in crawler.crawl():
+            storage.save_raw(raw)
+            storage.update_last_seen_date(raw)
+            crawled_cves.append(raw.cve_id)
+    except Exception:
+        storage.mark_stage1_end(status="failed")
+        raise
 
     elapsed = max(time.perf_counter() - started, 1e-6)
     logger.info(
@@ -155,6 +164,7 @@ def step1_crawl_to_raw(
         elapsed,
         len(crawled_cves) / elapsed,
     )
+    storage.mark_stage1_end(status="completed")
     return crawled_cves
 
 
@@ -211,6 +221,10 @@ def step2_filter_raw_to_yaml(
         len(entries),
         len(dedup_cve_ids),
     )
+    storage.mark_stage2_summary(
+        input_raw_count=len(dedup_cve_ids),
+        accepted_yaml_count=len(entries),
+    )
     return entries
 
 
@@ -255,7 +269,7 @@ def step3_calltrace(
     settings: CrawlerSettings,
     entries: list[AVDCveEntry],
     storage: CrawlStorage,
-) -> None:
+) -> tuple[int, int]:
     """Run async multi-turn LLM calltrace annotation and persist enriched YAML.
 
     The LLM traces BACKWARDS from each patched method to the HTTP entry point.
@@ -264,14 +278,14 @@ def step3_calltrace(
     """
     if not entries:
         logger.info("No entries – skipping LLM annotation.")
-        return
+        return 0, 0
 
     logger.info("=== Step 3 – resolving patch commits for %d entries ===", len(entries))
     targets = _build_targets(entries, settings.github_token)
 
     if not targets:
         logger.warning("No resolvable commits – skipping LLM annotation.")
-        return
+        return len(entries), 0
 
     repos_dir = str(Path(settings.data_dir) / "repos")
     explorer = CalltraceExplorer(
@@ -307,11 +321,18 @@ def step3_calltrace(
     )
 
     total = explorer.total_stats()
+    annotated_count = sum(1 for item in enriched if item.CallTrace is not None)
     logger.info(
-        "Step 3 complete – %d entries annotated  total_tokens=%d",
-        len(enriched),
+        "Step 3 complete – %d/%d entries annotated  total_tokens=%d",
+        annotated_count,
+        len(targets),
         total.total_tokens,
     )
+    storage.mark_stage3_summary(
+        target_count=len(targets),
+        annotated_count=annotated_count,
+    )
+    return len(targets), annotated_count
 
 
 # ---------------------------------------------------------------------------
