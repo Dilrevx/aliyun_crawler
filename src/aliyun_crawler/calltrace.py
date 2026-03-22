@@ -5,10 +5,11 @@ Given a CVE entry with a known patch commit, this module:
 1. Clones (or reuses a cached clone of) the affected repository.
 2. ``git checkout``s the vulnerable version (parent of the patch commit).
 3. Calls ``git diff`` on the patch commit to identify patched files and methods.
-4. Uses an LLM in a **multi-turn conversation** to trace backwards from the
-   patched methods to the HTTP/RPC entry points.  The model may request
-   additional source files each turn to extend the call chain until it reaches
-   an entry point or the max-round limit is hit.
+4. Uses a two-stage LLM workflow:
+     - Explorer: a **multi-turn conversation** that traces backwards from patched
+         methods to HTTP/RPC entry points, requesting additional files as needed.
+     - Validator: a single-turn pass that validates/fixes the candidate traces
+         and emits the final structured calltrace.
 5. Writes the ``before_traces`` / ``after_traces`` fields and the
    ``patch_method_before`` / ``patch_method_after`` fields into the
    :class:`~aliyun_crawler.models.AVDCveEntry`.
@@ -334,7 +335,7 @@ def _extract_patch_methods(
 # LLM prompts
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """\
+_EXPLORER_SYSTEM_PROMPT = """\
 You are a senior security researcher specialising in Java / web application
 vulnerability analysis.
 
@@ -375,7 +376,30 @@ Rules:
 """
 
 
-def _build_user_prompt(
+_VALIDATOR_SYSTEM_PROMPT = """\
+You are a strict calltrace validator.
+
+Task:
+1) Validate candidate before/after traces.
+2) Ensure direction is correct: depth 0 is HTTP/RPC entry, deepest is patched method.
+3) Ensure patched methods are represented in the deepest relevant frame(s).
+4) Drop unsupported frames and keep only repository-relative file paths.
+5) Return FINAL JSON only in this schema:
+{
+    "before_traces": [[{"depth":0,"file":"...","method":"...","start_line":0,"end_line":0}]],
+    "after_traces": [[{"depth":0,"file":"...","method":"...","start_line":0,"end_line":0}]],
+    "source": ["..."],
+    "sink": ["..."],
+    "reason": "..."
+}
+
+Rules:
+- No markdown, no prose outside JSON.
+- Use 0 for unknown line numbers.
+"""
+
+
+def _build_explorer_user_prompt(
     entry: AVDCveEntry,
     diff: str,
     file_contents: dict[str, str],
@@ -398,6 +422,40 @@ Description: {entry.CVEDescription}
 {file_sections}
 
 Analyse the above and produce the JSON calltrace.
+"""
+
+
+def _build_validator_user_prompt(
+    entry: AVDCveEntry,
+    diff: str,
+    candidate_result: dict,
+    patch_before: list[PatchMethod],
+    patch_after: list[PatchMethod],
+) -> str:
+    hint_before = [m.model_dump() for m in patch_before]
+    hint_after = [m.model_dump() for m in patch_after]
+    return f"""\
+CVE: {entry.CVE}
+
+## Patch diff (for grounding)
+```diff
+{diff[:5000]}
+```
+
+## Patch methods before
+{json.dumps(hint_before, ensure_ascii=False)}
+
+## Patch methods after
+{json.dumps(hint_after, ensure_ascii=False)}
+
+## Explorer candidate
+{json.dumps(candidate_result, ensure_ascii=False)}
+
+Note:
+- Patch methods above are heuristic hints extracted from diff hunk headers and may be noisy.
+- Prefer raw diff and candidate traces as primary evidence.
+
+Validate and return the final JSON in required schema.
 """
 
 
@@ -531,8 +589,20 @@ class CalltraceExplorer:
             entry.patch_method_before = before_methods
             entry.patch_method_after = after_methods
 
+            if not before_methods and not after_methods:
+                logger.warning(
+                    "[%s] No patch methods detected from diff hunks; continuing with raw diff only",
+                    entry.CVE,
+                )
+
             # Checkout patch commit to read post-patch file contents
             patched_files = _parse_diff_files(diff)
+            if not patched_files:
+                msg = "No patched files detected from diff"
+                logger.error("[%s] %s; skipping", entry.CVE, msg)
+                self._append_skip_reason(entry, msg)
+                return entry, TokenStats(cve_id=entry.CVE)
+
             try:
                 await asyncio.to_thread(_checkout, repo_path, patch_commit)
             except subprocess.CalledProcessError:
@@ -546,14 +616,46 @@ class CalltraceExplorer:
                 )
             }
 
-            # Multi-turn LLM exploration.  The repo lock is held throughout so
-            # the model can request and receive file contents from the checked-
-            # out working tree across turns.
-            raw_calltrace, stats = await self._ask_llm_multiturn(
+            if not initial_files:
+                msg = "Patched files contain no supported source file types"
+                logger.error("[%s] %s; skipping", entry.CVE, msg)
+                self._append_skip_reason(entry, msg)
+                return entry, TokenStats(cve_id=entry.CVE)
+
+            # Stage 1: Explorer (multi-turn). The repo lock is held throughout
+            # so the model can request and receive additional files.
+            raw_calltrace, stats = await self._explore_candidates_multiturn(
                 entry, diff, repo_path, initial_files, max_rounds=self.max_llm_rounds
             )
             if raw_calltrace:
-                entry = self._merge_calltrace(entry, raw_calltrace)
+                # Stage 2: Validator (single-turn)
+                validated_calltrace, validator_stats = await self._validate_candidates(
+                    entry,
+                    diff,
+                    raw_calltrace,
+                    before_methods,
+                    after_methods,
+                )
+                stats.rounds += validator_stats.rounds
+                stats.prompt_tokens += validator_stats.prompt_tokens
+                stats.completion_tokens += validator_stats.completion_tokens
+
+                final_calltrace = validated_calltrace or raw_calltrace
+                if before_methods or after_methods:
+                    if not self._trace_contains_patch_method(
+                        final_calltrace,
+                        before_methods + after_methods,
+                    ):
+                        logger.warning(
+                            "[%s] Validator result does not include heuristic patch methods; accepting trace",
+                            entry.CVE,
+                        )
+                        self._append_skip_reason(
+                            entry,
+                            "validator output does not include heuristic patch-method hints",
+                        )
+
+                entry = self._merge_calltrace(entry, final_calltrace)
 
             # Leave HEAD at patch commit
             try:
@@ -645,7 +747,40 @@ class CalltraceExplorer:
             self._repo_locks[key] = asyncio.Lock()
         return self._repo_locks[key]
 
-    async def _ask_llm_multiturn(
+    @staticmethod
+    def _append_skip_reason(entry: AVDCveEntry, message: str) -> None:
+        base = (entry.reason or "").strip()
+        marker = f"[calltrace skipped] {message}"
+        entry.reason = marker if not base else f"{base}\n{marker}"
+
+    @staticmethod
+    def _trace_contains_patch_method(
+        calltrace_result: dict,
+        patch_methods: list[PatchMethod],
+    ) -> bool:
+        if not patch_methods:
+            return False
+        patch_keys = {(p.file, p.method) for p in patch_methods if p.file and p.method}
+        if not patch_keys:
+            return False
+
+        for trace_key in ("before_traces", "after_traces"):
+            traces = calltrace_result.get(trace_key, [])
+            if not isinstance(traces, list):
+                continue
+            for chain in traces:
+                if not isinstance(chain, list):
+                    continue
+                for frame in chain:
+                    if not isinstance(frame, dict):
+                        continue
+                    file_path = str(frame.get("file", ""))
+                    method = str(frame.get("method", ""))
+                    if (file_path, method) in patch_keys:
+                        return True
+        return False
+
+    async def _explore_candidates_multiturn(
         self,
         entry: AVDCveEntry,
         diff: str,
@@ -661,8 +796,11 @@ class CalltraceExplorer:
         Returns ``(final_result, stats)``.
         """
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_prompt(entry, diff, initial_files)},
+            {"role": "system", "content": _EXPLORER_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": _build_explorer_user_prompt(entry, diff, initial_files),
+            },
         ]
         final_result: Optional[dict] = None
         stats = TokenStats(cve_id=entry.CVE)
@@ -751,6 +889,45 @@ class CalltraceExplorer:
             )
 
         return final_result, stats
+
+    async def _validate_candidates(
+        self,
+        entry: AVDCveEntry,
+        diff: str,
+        candidate_result: dict,
+        patch_before: list[PatchMethod],
+        patch_after: list[PatchMethod],
+    ) -> tuple[Optional[dict], TokenStats]:
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": _VALIDATOR_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": _build_validator_user_prompt(
+                    entry,
+                    diff,
+                    candidate_result,
+                    patch_before,
+                    patch_after,
+                ),
+            },
+        ]
+        stats = TokenStats(cve_id=entry.CVE)
+
+        try:
+            response_text, p_tok, c_tok = await self._llm.chat(messages)
+        except Exception as exc:
+            logger.error("[%s] Validator LLM call failed: %s", entry.CVE, exc)
+            return None, stats
+
+        stats.rounds = 1
+        stats.prompt_tokens = p_tok
+        stats.completion_tokens = c_tok
+
+        if not response_text:
+            return None, stats
+
+        _, parsed = _parse_llm_response(response_text)
+        return parsed, stats
 
     def _merge_calltrace(self, entry: AVDCveEntry, data: dict) -> AVDCveEntry:
         """Merge parsed LLM output into *entry*."""
