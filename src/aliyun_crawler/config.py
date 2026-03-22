@@ -130,6 +130,10 @@ class CrawlerSettings(BaseSettings):
         default=4,
         description="Max LLM conversation turns per CVE (1 initial + N-1 file-request rounds)",
     )
+    calltrace_output_subdir: str = Field(
+        default="yaml_calltrace",
+        description="Subdirectory under data_dir for Step3 enriched YAML output",
+    )
 
     # Logging
     log_dir: Optional[str] = Field(

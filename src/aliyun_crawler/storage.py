@@ -330,6 +330,25 @@ class CrawlStorage:
         logger.debug("Saved YAML entry: %s", path)
         return path
 
+    def save_yaml_to_subdir(self, entry: AVDCveEntry, subdir: str) -> Path:
+        """Write *entry* as YAML to ``<data_dir>/<subdir>/<CVE-ID>.yaml``."""
+        safe = subdir.strip().strip("/")
+        if not safe:
+            return self.save_yaml(entry)
+
+        out_dir = self.root / safe
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{entry.CVE}.yaml"
+        doc = entry.to_yaml_dict()
+        path.write_text(
+            yaml.dump(
+                doc, allow_unicode=True, default_flow_style=False, sort_keys=False
+            ),
+            encoding="utf-8",
+        )
+        logger.debug("Saved YAML entry to subdir: %s", path)
+        return path
+
     def load_yaml(self, cve_id: str) -> Optional[AVDCveEntry]:
         """Load a previously-saved enriched entry by CVE ID, or return *None*."""
         path = self.yaml_dir / f"{cve_id}.yaml"

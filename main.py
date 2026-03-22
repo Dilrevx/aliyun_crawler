@@ -297,14 +297,17 @@ def step3_calltrace(
         git_proxy=settings.git_proxy,
         max_llm_rounds=settings.calltrace_max_rounds,
     )
+    calltrace_subdir = settings.calltrace_output_subdir
 
     def _on_done(entry: AVDCveEntry, stats: TokenStats) -> None:
-        storage.save_yaml(entry)
+        storage.save_yaml_to_subdir(entry, calltrace_subdir)
         logger.info(
-            "annotated  %s  rounds=%d  tokens=%d",
+            "annotated  %s  rounds=%d  tokens=%d  out=%s/%s.yaml",
             entry.CVE,
             stats.rounds,
             stats.total_tokens,
+            calltrace_subdir,
+            entry.CVE,
         )
 
     logger.info(
