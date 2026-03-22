@@ -70,6 +70,21 @@ uv run python main.py
 BROWSER_ENGINE=firefox uv run python main.py
 ```
 
+## 故障调试 (反爬虫)
+
+存在以下问题：
+
+1. IDC 机房 IP 不干净导致 Ali 的 WAF 可信度打分偏低，触发滑动验证而非自动 JS 验证。  
+  自动 JS 验证理论上可被 stealth 方案覆盖，但滑动验证会导致列表页无法直接产出 CVE 数据。
+2. 不明原因导致 Playwright `chromium` 无法打开任何网站 (eg. baidu)，而 `firefox` 可以。
+
+尝试安装依赖或者换 `firefox` ：
+
+```bash
+playwright install-deps chromium
+BROWSER_ENGINE=firefox uv run python main.py
+```
+
 ## 运行流程（重构后）
 
 ### Step 1 – 仅爬取 RAW
