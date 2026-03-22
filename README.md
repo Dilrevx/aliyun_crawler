@@ -43,6 +43,7 @@ cp .env.example .env
 | `PAGE_CONCURRENCY` | Step1 按页并发窗口大小 | `4` |
 | `SINCE` | 增量阈值（仅抓取该日期之后修改的条目） | 不限制 |
 | `DATA_DIR` | 输出目录 | `./output/aliyun_cve` |
+| `BROWSER_ENGINE` | Playwright 内核：`chromium`/`firefox`/`webkit` | `chromium` |
 
 ### 其他变量
 
@@ -61,6 +62,12 @@ cp .env.example .env
 
 ```bash
 uv run python main.py
+```
+
+如需切换内核（例如本机 Chromium 网络异常时）：
+
+```bash
+BROWSER_ENGINE=firefox uv run python main.py
 ```
 
 ## 运行流程（重构后）

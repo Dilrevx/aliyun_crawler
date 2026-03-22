@@ -113,10 +113,28 @@ class AVDCrawler:
         self.config = config or CrawlConfig()
         self._page: Optional[Page] = None
         self._since: Optional[datetime] = None
+        self._browser_engine = (self.config.browser_engine or "chromium").lower()
+        if self._browser_engine not in {"chromium", "firefox", "webkit"}:
+            raise ValueError(
+                "Unsupported browser_engine: "
+                f"{self.config.browser_engine!r}; expected chromium|firefox|webkit"
+            )
         if self.config.since:
             self._since = _parse_date(self.config.since)
             if self._since is None:
                 logger.warning("Could not parse 'since' date: %s", self.config.since)
+
+    def _async_browser_type(self, playwright):
+        return getattr(playwright, self._browser_engine)
+
+    def _sync_browser_type(self, playwright):
+        return getattr(playwright, self._browser_engine)
+
+    def _launch_kwargs(self) -> dict[str, object]:
+        kwargs: dict[str, object] = {"headless": self.config.headless}
+        if self._browser_engine == "chromium":
+            kwargs["args"] = _BROWSER_ARGS
+        return kwargs
 
     # ------------------------------------------------------------------
     # Public API
@@ -145,17 +163,17 @@ class AVDCrawler:
         concurrency = max(1, getattr(self.config, "page_concurrency", 1))
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=self.config.headless,
-                args=_BROWSER_ARGS,
-            )
+            browser_type = self._async_browser_type(p)
+            browser = await browser_type.launch(**self._launch_kwargs())
             try:
                 ctx = await browser.new_context(
                     user_agent=_USER_AGENT,
                     viewport={"width": 1280, "height": 800},
                     locale="zh-CN",
                 )
-                if hasattr(_STEALTH, "apply_stealth_async"):
+                if self._browser_engine == "chromium" and hasattr(
+                    _STEALTH, "apply_stealth_async"
+                ):
                     await _STEALTH.apply_stealth_async(ctx)  # type: ignore[attr-defined]
 
                 page_num = 1
@@ -312,17 +330,16 @@ class AVDCrawler:
     @contextmanager
     def _browser_context(self) -> Iterator[BrowserContext]:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=self.config.headless,
-                args=_BROWSER_ARGS,
-            )
+            browser_type = self._sync_browser_type(p)
+            browser = browser_type.launch(**self._launch_kwargs())
             try:
                 ctx = browser.new_context(
                     user_agent=_USER_AGENT,
                     viewport={"width": 1280, "height": 800},
                     locale="zh-CN",
                 )
-                _STEALTH.apply_stealth_sync(ctx)
+                if self._browser_engine == "chromium":
+                    _STEALTH.apply_stealth_sync(ctx)
                 yield ctx
             finally:
                 browser.close()
