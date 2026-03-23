@@ -349,6 +349,24 @@ class CrawlStorage:
         logger.debug("Saved YAML entry to subdir: %s", path)
         return path
 
+    def yaml_exists_in_subdir(self, cve_id: str, subdir: str) -> bool:
+        """Return True when ``<data_dir>/<subdir>/<CVE-ID>.yaml`` exists."""
+        safe = subdir.strip().strip("/")
+        if not safe:
+            return self.yaml_exists(cve_id)
+        return (self.root / safe / f"{cve_id}.yaml").exists()
+
+    def list_yaml_cve_ids_in_subdir(self, subdir: str) -> list[str]:
+        """Return all CVE IDs present in ``<data_dir>/<subdir>`` YAML files."""
+        safe = subdir.strip().strip("/")
+        if not safe:
+            return self.list_yaml_cve_ids()
+
+        out_dir = self.root / safe
+        if not out_dir.exists():
+            return []
+        return [p.stem for p in sorted(out_dir.glob("CVE-*.yaml"))]
+
     def load_yaml(self, cve_id: str) -> Optional[AVDCveEntry]:
         """Load a previously-saved enriched entry by CVE ID, or return *None*."""
         path = self.yaml_dir / f"{cve_id}.yaml"
@@ -360,6 +378,31 @@ class CrawlStorage:
         except Exception as exc:
             logger.error("Could not load YAML entry %s: %s", cve_id, exc)
             return None
+
+    def load_yaml_from_subdir(self, cve_id: str, subdir: str) -> Optional[AVDCveEntry]:
+        """Load an entry from ``<data_dir>/<subdir>/<CVE-ID>.yaml``."""
+        safe = subdir.strip().strip("/")
+        if not safe:
+            return self.load_yaml(cve_id)
+
+        path = self.root / safe / f"{cve_id}.yaml"
+        if not path.exists():
+            return None
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            return AVDCveEntry(**doc)
+        except Exception as exc:
+            logger.error(
+                "Could not load YAML entry %s from subdir %s: %s", cve_id, safe, exc
+            )
+            return None
+
+    def has_nonempty_calltrace_in_subdir(self, cve_id: str, subdir: str) -> bool:
+        """Return True only when entry exists and CallTrace has at least one frame."""
+        item = self.load_yaml_from_subdir(cve_id, subdir)
+        if item is None or item.CallTrace is None:
+            return False
+        return bool(item.CallTrace.before_traces or item.CallTrace.after_traces)
 
     def yaml_exists(self, cve_id: str) -> bool:
         return (self.yaml_dir / f"{cve_id}.yaml").exists()

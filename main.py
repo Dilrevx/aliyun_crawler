@@ -298,12 +298,42 @@ def step3_calltrace(
         logger.info("No entries – skipping LLM annotation.")
         return 0, 0
 
-    logger.info("=== Step 3 – resolving patch commits for %d entries ===", len(entries))
-    targets = _build_targets(entries, settings.github_token)
+    calltrace_subdir = settings.calltrace_output_subdir
+    existing_cves = storage.list_yaml_cve_ids_in_subdir(calltrace_subdir)
+    done_cves = {
+        cve_id
+        for cve_id in existing_cves
+        if storage.has_nonempty_calltrace_in_subdir(cve_id, calltrace_subdir)
+    }
+    empty_calltrace_count = len(existing_cves) - len(done_cves)
+    pending_entries = [entry for entry in entries if entry.CVE not in done_cves]
+    skipped_count = len(entries) - len(pending_entries)
+    if skipped_count:
+        logger.info(
+            "Step 3 incremental skip – %d already annotated (non-empty CallTrace) in %s",
+            skipped_count,
+            calltrace_subdir,
+        )
+    if empty_calltrace_count:
+        logger.info(
+            "Step 3 incremental retry – %d existing outputs have empty CallTrace",
+            empty_calltrace_count,
+        )
+
+    if not pending_entries:
+        logger.info("Step 3: all entries already annotated; nothing to do.")
+        storage.mark_stage3_summary(target_count=0, annotated_count=0)
+        return 0, 0
+
+    logger.info(
+        "=== Step 3 – resolving patch commits for %d entries ===",
+        len(pending_entries),
+    )
+    targets = _build_targets(pending_entries, settings.github_token)
 
     if not targets:
         logger.warning("No resolvable commits – skipping LLM annotation.")
-        return len(entries), 0
+        return len(pending_entries), 0
 
     repos_dir = str(Path(settings.data_dir) / "repos")
     explorer = CalltraceExplorer(
@@ -315,7 +345,6 @@ def step3_calltrace(
         git_proxy=settings.git_proxy,
         max_llm_rounds=settings.calltrace_max_rounds,
     )
-    calltrace_subdir = settings.calltrace_output_subdir
 
     def _on_done(entry: AVDCveEntry, stats: TokenStats) -> None:
         storage.save_yaml_to_subdir(entry, calltrace_subdir)
