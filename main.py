@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from datetime import datetime
@@ -176,6 +177,23 @@ def step1_crawl_to_raw(
 def _list_raw_cve_ids(storage: CrawlStorage) -> list[str]:
     """List all CVE IDs present in raw storage."""
     return sorted(p.stem for p in storage.raw_dir.glob("CVE-*.json"))
+
+
+def _list_yaml_entries(storage: CrawlStorage) -> list[AVDCveEntry]:
+    """Load all existing YAML entries from storage."""
+    entries: list[AVDCveEntry] = []
+    for cve_id in storage.list_yaml_cve_ids():
+        item = storage.load_yaml(cve_id)
+        if item is not None:
+            entries.append(item)
+    return entries
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def step2_filter_raw_to_yaml(
@@ -348,9 +366,9 @@ def main() -> None:
     _setup_logging(settings.log_dir)
     storage = CrawlStorage(data_dir=settings.data_dir)
 
-    run_step1_crawl_raw = True
-    run_step2_filter_yaml = True
-    run_step3_calltrace = False
+    run_step1_crawl_raw = _env_bool("RUN_STEP1_CRAWL_RAW", True)
+    run_step2_filter_yaml = _env_bool("RUN_STEP2_FILTER_YAML", True)
+    run_step3_calltrace = _env_bool("RUN_STEP3_CALLTRACE", False)
 
     crawled_cves: list[str] = []
     if run_step1_crawl_raw:
@@ -369,6 +387,13 @@ def main() -> None:
         entries = step2_filter_raw_to_yaml(storage, crawled_cves)
     else:
         logger.info("Step 2 skipped (run_step2_filter_yaml=False)")
+
+    if run_step3_calltrace and not entries:
+        entries = _list_yaml_entries(storage)
+        logger.info(
+            "Step 3 uses existing yaml files (count=%d)",
+            len(entries),
+        )
 
     if run_step3_calltrace:
         step3_calltrace(settings, entries, storage)

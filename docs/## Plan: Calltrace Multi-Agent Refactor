@@ -1,0 +1,87 @@
+## Plan: Calltrace Multi-Agent Refactor
+
+将现有单体 `CalltraceExplorer` 重构为 `Coordinator + Explorer + Evaluator` 三层协作架构：Coordinator 维护最小状态和路由，Explorer 作为一次性代码检索执行体，Evaluator 对路径与 CVE 语义一致性做判断。为控制 token，新增 `summary` 工具；为结构化代码提取，新增单文件 AST 工具并保留可回退机制。保持对外入口兼容（`CalltraceExplorer.explore/explore_many` 不变，可以重命名），分阶段上线、每阶段可回滚。
+
+**Steps**
+1. **Phase 0 — 架构对齐与约束冻结**
+   - 明确保持兼容的接口边界：`main.py::step3_calltrace` 调用方式不变。
+   - 冻结最小状态模型：Coordinator 仅持有 `patch_semantics`、`confirmed_nodes`、`pending_nodes`、`evidence_digest`。
+   - 定义失败策略：工具失败或证据不足时允许 partial 结果，并在 `reason` 中标注原因。
+   - *depends on: none*
+
+2. **Phase 1 — Tool 层抽离（不改业务行为）**
+   - 从 `calltrace.py` 抽离工具适配层（读文件、检索、函数体提取、usages、git/grep）。
+   - 新增统一工具协议（请求/响应模型、错误码、超时、路径校验）。
+   - 对“常见命令行查找”提供受控执行工具（白名单命令 + cwd 限制 + 输出截断）。
+   - *depends on: 1; parallel with step 3 design docs drafting*
+
+3. **Phase 2 — Explorer Agent（一次性执行体）**
+   - 将当前 explorer 多轮 loop 迁移为 Explorer：输入明确任务（如“追 uid 来源”），输出精简结论和证据引用。
+   - 加入 token 释放语义：每次 Explorer 任务完成后丢弃其读取历史，仅回传结构化摘要。
+   - 加入轮次内 budget：`max_files_per_round`、`round_char_budget`、`max_rounds`。
+   - *depends on: 2*
+
+4. **Phase 3 — Summary Tool（上下文压缩）**
+   - 新增 `summary_xxx` 工具：对大文件生成结构化摘要，对多轮对话历史生成摘要，配合其他机制控制上下文长度。
+   - Coordinator 可以通过某种机制，在上下文长度超长的时候压缩状态。对于无争议部分仅保留结构化结果和摘要，不保存原始代码片段。
+   - *depends on: 2,3*
+
+5. **Phase 4 — AST Tool（单文件辅助）+ Deprecation 策略**
+   - 新增单文件 AST 解析工具（首批支持 Python/Go/TS；不支持语言返回 `unsupported_node_kind`）。
+   - deprecate 策略：默认不开启 AST TOOL，配置开关 + warning 日志；先移除 heuristic，靠 explorer 字符搜索实现，之后再打开。
+   - *depends on: 2; parallel with step 6 early scaffolding*
+
+6. **Phase 5 — Coordinator Agent（主控 / 路由）**
+   - 实现 Trace 树状态机：从 patch 语义初始化待探索节点，按优先级派发 Explorer 任务。
+   - 派发策略通过 prompt 调整：优先 patch 触达路径、再补全 entry/source/sink。
+   - 汇聚结果时执行去重、冲突消解与置信度标注。
+   - *depends on: 3,4,5*
+
+7. **Phase 6 — Evaluator Agent（逻辑评估）**
+   - 独立评估“路径是否真实触发 CVE 语义”：检查是否存在 sanitizer、权限校验、条件短路等。
+   - 明确输出：`valid_path` / `dead_end` / `needs_more_evidence`，并可回调 Coordinator 二次取证。
+   - 与 Validator prompt 对齐：优先 CVE 描述与 commit 语义，不依赖 noisy patch hints。
+   - *depends on: 6*
+
+8. **Phase 7 — 兼容适配与渐进切换**
+   - 不需要兼容，直接替换。可以修改相关 model，新增内部诊断字段
+   - 写 YAML 不要原地修改，改到新目录。
+   - *depends on: 7*
+
+9. **Phase 8 — 验证与回归**
+   - 使用已验证样例（如 `CVE-2025-14608`、`CVE-2025-50180`）做评估：成功率、token、时延、trace 质量。
+   - 增加失败注入测试：工具超时、AST unsupported、空 diff、路径不存在。
+   - 产出迁移报告与默认切换建议。
+   - *depends on: 8*
+
+10. token 用量统计。
+
+**Relevant files**
+- `/data/lhq/workspace/aliyun_crawler/src/aliyun_crawler/calltrace.py` — 现有入口与流程 façade，迁移期间保持兼容。
+- `/data/lhq/workspace/aliyun_crawler/src/aliyun_crawler/models.py` — 新增 agent 内部状态/工具协议模型（不破坏 `AVDCveEntry`）。
+- `/data/lhq/workspace/aliyun_crawler/main.py` — `step3_calltrace` 维持调用面，仅注入新配置。
+- `/data/lhq/workspace/aliyun_crawler/src/aliyun_crawler/config.py` — 增加架构开关与 token/round budget 配置。
+- `/data/lhq/workspace/aliyun_crawler/docs/calltrace_context_management.md` — 对齐上下文管理策略与阶段目标。
+- `/data/lhq/workspace/aliyun_crawler/docs/copilot_precise_editing_reference.md` — 借鉴“检索-窄读-补丁-验证”的工具化模式。
+- `/data/lhq/workspace/aliyun_crawler/src/aliyun_crawler/agents/`（新目录）— `coordinator.py`, `Explorer.py`, `evaluator.py`, `tools.py`。
+- `/data/lhq/workspace/aliyun_crawler/src/aliyun_crawler/analysis/`（新目录）— `summary.py`, `ast_single_file.py`。
+
+
+**Verification**
+1. 单元级：工具层（read/search/exec/summary/ast）输入输出与错误码测试。
+2. 集成级：`CALLTRACE_ARCH=v2` 下跑 2 个 2025 样例，比较 `CallTrace/source/sink/reason`。
+3. 质量级：统计 `rounds/tokens/P95`，验证 summary 引入后 token 下降。
+4. 稳定级：并发 `explore_many` 下 repo lock 与状态不串扰。
+
+**Decisions**
+- 包含范围：架构拆分、summary 工具、AST 单文件工具、兼容切换与验证框架。
+- 关键原则：Coordinator 不持有报错等任务目标无关信息；Explorers task-scoped memory；Evaluator 以 CVE+commit 语义为最终裁决。
+
+**Further Considerations**
+1. `summary` 工具实现策略：
+   - Option A：规则摘要（快、稳、无额外模型成本，推荐起步）
+   - Option B：LLM 摘要（质量高但成本波动）
+2. AST 后端选择 tree-sitter
+3. 评估闭环：
+   - Option A：Evaluator 可发起一次补充调查（更准）
+   - Option B：只做单次裁决（更快）
