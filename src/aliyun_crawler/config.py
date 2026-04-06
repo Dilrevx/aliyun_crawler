@@ -95,6 +95,24 @@ class CrawlerSettings(BaseSettings):
     data_dir: str = "./output/aliyun_cve"
     cache_ttl: int = 86400
 
+    # RawDB settings
+    rawdb_storage_backend: str = Field(
+        default="dual",
+        description="RawDB backend: file/sqlite/dual",
+    )
+    rawdb_sqlite_path: Optional[str] = Field(
+        default=None,
+        description="SQLite file path for RawDB backend",
+    )
+    rawdb_api_host: str = Field(
+        default="127.0.0.1",
+        description="RawDB FastAPI bind host",
+    )
+    rawdb_api_port: int = Field(
+        default=8787,
+        description="RawDB FastAPI bind port",
+    )
+
     since: Optional[str] = Field(
         default=None, description="ISO date string for incremental crawl"
     )

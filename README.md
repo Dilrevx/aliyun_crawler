@@ -8,12 +8,15 @@
 main.py                  # 入口，三个主步骤 + 本地开关
 src/aliyun_crawler/
   config.py              # 配置（从 .env 读取）
-  crawler.py             # Playwright 爬虫
-  filter.py              # 可链式组合的过滤管道
   models.py              # Pydantic 数据模型
-  storage.py             # 文件持久化（JSON + YAML）
   commit_resolver.py     # GitHub API：PR/Issue → commit SHA
-  calltrace.py           # Git 操作 + 异步多轮 LLM 对话
+  cli/                   # CLI 入口包
+  crawler/               # 爬虫包（兼容旧 crawler.py）
+  filter/                # 过滤器包（兼容旧 filter.py）
+  server/                # FastAPI 服务器包
+  storage/               # 存储包（兼容旧 storage.py）
+  tracer/                # calltrace/tracer 包（兼容旧 calltrace.py）
+  rawdb/                 # 独立 raw 数据库模块：file/sqlite/dual + API
 .env.example             # 配置模板，复制为 .env 后填写
 ```
 
@@ -62,6 +65,56 @@ cp .env.example .env
 ```bash
 uv run python main.py
 ```
+
+或者使用拆分后的命令入口：
+
+```bash
+uv run aliyun-crawler
+uv run aliyun-rawdb
+```
+
+## RawDB 模块（新增）
+
+RawDB 用于独立承载 raw 构建与查询能力，支持双写存储与页面级断点恢复。
+
+### 存储后端
+
+- `RAWDB_STORAGE_BACKEND=file`：仅本地文件（`<DATA_DIR>/raw/*.json` + `.rawdb.state.json`）
+- `RAWDB_STORAGE_BACKEND=sqlite`：仅 SQLite（默认 `<DATA_DIR>/raw.db`）
+- `RAWDB_STORAGE_BACKEND=dual`：双写（推荐，sqlite 主读 + file 兜底）
+
+可选：`RAWDB_SQLITE_PATH=/abs/path/to/raw.db`
+
+### CLI
+
+```bash
+# 增量抓取（默认从最早缺口页恢复）
+uv run aliyun-rawdb crawl
+
+# 从指定页开始
+uv run aliyun-rawdb crawl --start-page 50
+
+# 查看缺失/失败页段
+uv run aliyun-rawdb gaps --max-page 200
+
+# 重试指定页面
+uv run aliyun-rawdb retry --pages 50 51 52
+
+# 启动 FastAPI
+uv run aliyun-rawdb api
+```
+
+对应的 CLI 分层入口现在也可以通过 `uv run aliyun-crawler` 启动，后续如果要再拆细命令，可以直接放进 `src/aliyun_crawler/cli/`。
+
+### FastAPI 接口
+
+- `GET /health`：健康检查
+- `GET /raw/{cve_id}`：按 CVE 精确查询
+- `GET /raw?modified_from=2024-01-01&modified_to=2024-12-31&page=1&page_size=50`：范围 + 分页查询
+- `GET /pages/checkpoints`：查看页级检查点
+- `GET /pages/gaps?max_page=200`：返回缺失/失败页段
+- `POST /pages/retry`：重试指定页面
+- `POST /crawl/resume`：按恢复策略继续抓取
 
 ## 运行流程（重构后）
 

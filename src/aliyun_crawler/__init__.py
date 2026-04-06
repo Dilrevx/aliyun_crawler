@@ -10,7 +10,9 @@ from aliyun_crawler.config import CrawlConfig, CrawlerSettings
 from aliyun_crawler.crawler import AVDCrawler
 from aliyun_crawler.filter import FilterPipeline
 from aliyun_crawler.models import AVDCveEntry, CallTraceData, RawAVDEntry
+from aliyun_crawler.rawdb import RawIngestService, build_raw_repository, create_app
 from aliyun_crawler.storage import CrawlStorage
+from aliyun_crawler.tracer import CalltraceExplorer, TokenStats
 
 __all__ = [
     "CrawlConfig",
@@ -21,4 +23,9 @@ __all__ = [
     "AVDCrawler",
     "FilterPipeline",
     "CrawlStorage",
+    "CalltraceExplorer",
+    "TokenStats",
+    "RawIngestService",
+    "build_raw_repository",
+    "create_app",
 ]

@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.14.3",
+    "fastapi>=0.116.1",
     "httpx[socks]>=0.28.1",
     "openai>=1.0.0",
     "playwright>=1.40.0",
@@ -13,7 +14,12 @@ dependencies = [
     "pydantic>=2.12.5",
     "pydantic-settings>=2.13.1",
     "pyyaml>=6.0.3",
+    "uvicorn>=0.35.0",
 ]
+
+[project.scripts]
+aliyun-rawdb = "aliyun_crawler.rawdb_cli:main"
+aliyun-crawler = "aliyun_crawler.cli:main"
 
 [tool.uv]
 package = true

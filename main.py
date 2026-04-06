@@ -21,9 +21,11 @@ from typing import Optional
 from aliyun_crawler.calltrace import CalltraceExplorer, TokenStats
 from aliyun_crawler.commit_resolver import _COMMIT_RE, _ISSUE_RE, _PR_RE, CommitResolver
 from aliyun_crawler.config import CrawlerSettings
-from aliyun_crawler.crawler import AVDCrawler
 from aliyun_crawler.filter import FilterPipeline
 from aliyun_crawler.models import AVDCveEntry, RawAVDEntry
+from aliyun_crawler.rawdb.factory import build_raw_repository
+from aliyun_crawler.rawdb.repositories import RawRepository
+from aliyun_crawler.rawdb.service import RawIngestService
 from aliyun_crawler.storage import CrawlStorage
 
 
@@ -126,6 +128,7 @@ def _is_logic_vulnerability(entry: RawAVDEntry) -> bool:
 def step1_crawl_to_raw(
     settings: CrawlerSettings,
     storage: CrawlStorage,
+    raw_repository: RawRepository,
 ) -> list[str]:
     """Crawl avd.aliyun.com and persist RAW entries only.
 
@@ -142,29 +145,39 @@ def step1_crawl_to_raw(
         page_concurrency=config.page_concurrency,
     )
 
-    crawler = AVDCrawler(config)
+    service = RawIngestService(config, raw_repository)
 
-    crawled_cves: list[str] = []
     started = time.perf_counter()
     logger.info("=== Step 1 – crawl raw (max_pages=%d) ===", config.max_pages)
 
     try:
-        for raw in crawler.crawl():
-            storage.save_raw(raw)
-            storage.update_last_seen_date(raw)
-            crawled_cves.append(raw.cve_id)
+        run_result = service.crawl_incremental(start_page=None)
     except Exception:
         storage.mark_stage1_end(status="failed")
         raise
 
+    meta = raw_repository.get_meta()
+    state = storage.load_state()
+    state["stage1"]["incremental"]["last_seen_date"] = meta.last_seen_date
+    state["stage1"]["incremental"]["last_seen_cve"] = meta.last_seen_cve
+    state["stage1"]["last_run"]["raw_saved"] = run_result.saved_entries
+    state["stage1"]["totals"]["raw_saved"] += run_result.saved_entries
+    state["updated_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    storage.save_state(state)
+
+    crawled_cves = raw_repository.list_cve_ids(pages=run_result.executed_pages)
+    if not crawled_cves and run_result.saved_entries > 0:
+        crawled_cves = _list_raw_cve_ids(storage, raw_repository=raw_repository)
+
     elapsed = max(time.perf_counter() - started, 1e-6)
     logger.info(
         "Step 1 complete – %d raw entries persisted in %.1fs (%.2f entries/s)",
-        len(crawled_cves),
+        run_result.saved_entries,
         elapsed,
-        len(crawled_cves) / elapsed,
+        run_result.saved_entries / elapsed,
     )
-    storage.mark_stage1_end(status="completed")
+    end_status = "completed" if not run_result.failed_pages else "partial"
+    storage.mark_stage1_end(status=end_status)
     return crawled_cves
 
 
@@ -173,14 +186,25 @@ def step1_crawl_to_raw(
 # ---------------------------------------------------------------------------
 
 
-def _list_raw_cve_ids(storage: CrawlStorage) -> list[str]:
+def _list_raw_cve_ids(
+    storage: CrawlStorage,
+    raw_repository: RawRepository | None = None,
+) -> list[str]:
     """List all CVE IDs present in raw storage."""
-    return sorted(p.stem for p in storage.raw_dir.glob("CVE-*.json"))
+    file_items = sorted(p.stem for p in storage.raw_dir.glob("CVE-*.json"))
+    if file_items:
+        return file_items
+
+    if raw_repository is None:
+        return []
+
+    return raw_repository.list_cve_ids()
 
 
 def step2_filter_raw_to_yaml(
     storage: CrawlStorage,
     cve_ids: list[str],
+    raw_repository: RawRepository | None = None,
 ) -> list[AVDCveEntry]:
     """Filter raw entries and persist accepted results to YAML.
 
@@ -200,6 +224,8 @@ def step2_filter_raw_to_yaml(
     entries: list[AVDCveEntry] = []
     for cve_id in dedup_cve_ids:
         raw = storage.load_raw(cve_id)
+        if raw is None and raw_repository is not None:
+            raw = raw_repository.get_raw(cve_id)
         if raw is None:
             continue
 
@@ -344,6 +370,7 @@ def main() -> None:
     settings = CrawlerSettings()
     _setup_logging(settings.log_dir)
     storage = CrawlStorage(data_dir=settings.data_dir)
+    raw_repository = build_raw_repository(settings)
 
     run_step1_crawl_raw = True
     run_step2_filter_yaml = True
@@ -351,19 +378,23 @@ def main() -> None:
 
     crawled_cves: list[str] = []
     if run_step1_crawl_raw:
-        crawled_cves = step1_crawl_to_raw(settings, storage)
+        crawled_cves = step1_crawl_to_raw(settings, storage, raw_repository)
     else:
         logger.info("Step 1 skipped (run_step1_crawl_raw=False)")
 
     entries: list[AVDCveEntry] = []
     if run_step2_filter_yaml:
         if not crawled_cves:
-            crawled_cves = _list_raw_cve_ids(storage)
+            crawled_cves = _list_raw_cve_ids(storage, raw_repository=raw_repository)
             logger.info(
                 "Step 2 uses existing raw files (count=%d)",
                 len(crawled_cves),
             )
-        entries = step2_filter_raw_to_yaml(storage, crawled_cves)
+        entries = step2_filter_raw_to_yaml(
+            storage,
+            crawled_cves,
+            raw_repository=raw_repository,
+        )
     else:
         logger.info("Step 2 skipped (run_step2_filter_yaml=False)")
 
