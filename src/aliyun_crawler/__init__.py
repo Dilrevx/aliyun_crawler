@@ -6,13 +6,13 @@ via GitHub APIs, and optionally drives an LLM to produce calltrace fields
 matching the route-hacker YAML schema.
 """
 
-from aliyun_crawler.config import CrawlConfig, CrawlerSettings
-from aliyun_crawler.crawler import AVDCrawler
-from aliyun_crawler.filter import FilterPipeline
-from aliyun_crawler.models import AVDCveEntry, CallTraceData, RawAVDEntry
-from aliyun_crawler.rawdb import RawIngestService, build_raw_repository, create_app
-from aliyun_crawler.storage import CrawlStorage
-from aliyun_crawler.tracer import CalltraceExplorer, TokenStats
+from .config import CrawlConfig, CrawlerSettings
+from .crawler import AVDCrawler
+from .filter import FilterPipeline
+from .models import AVDCveEntry, CallTraceData, RawAVDEntry
+from .rawdb import RawIngestService, build_raw_repository, create_app
+from .storage import CrawlStorage
+from .tracer import CalltraceExplorer, TokenStats
 
 __all__ = [
     "CrawlConfig",

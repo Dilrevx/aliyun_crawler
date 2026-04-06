@@ -12,19 +12,16 @@ from aliyun_crawler.rawdb.service import RawIngestService
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Aliyun RawDB tools")
+    parser = argparse.ArgumentParser(description="Aliyun crawler tools")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    crawl = sub.add_parser("crawl", help="run incremental crawl into RawDB")
+    crawl = sub.add_parser("crawl", help="run incremental crawl into raw storage")
     crawl.add_argument("--start-page", type=int, default=None)
 
     retry = sub.add_parser("retry", help="retry explicit pages")
     retry.add_argument("--pages", nargs="+", type=int, required=True)
 
-    gaps = sub.add_parser("gaps", help="show missing/failed page segments")
-    gaps.add_argument("--max-page", type=int, required=True)
-    gaps.add_argument("--exclude-failed", action="store_true")
-
+    sub.add_parser("gaps", help="show missing/failed page segments")
     sub.add_parser("api", help="start FastAPI service")
     return parser
 
@@ -49,8 +46,8 @@ def main() -> None:
 
     if args.command == "gaps":
         gap_items = repository.get_gaps(
-            max_page=args.max_page,
-            include_failed=not args.exclude_failed,
+            max_page=settings.max_pages,
+            include_failed=True,
         )
         print(
             json.dumps(
@@ -71,7 +68,3 @@ def main() -> None:
         port=settings.rawdb_api_port,
         log_level="info",
     )
-
-
-if __name__ == "__main__":
-    main()

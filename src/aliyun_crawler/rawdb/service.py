@@ -8,7 +8,7 @@ from typing import Optional
 from playwright.async_api import async_playwright
 
 from aliyun_crawler.config import CrawlConfig
-from aliyun_crawler.crawler import _BROWSER_ARGS, _STEALTH, _USER_AGENT, AVDCrawler
+from aliyun_crawler.crawler.core import _BROWSER_ARGS, _STEALTH, _USER_AGENT, AVDCrawler
 from aliyun_crawler.rawdb.models import (
     CrawlRunResult,
     PageCheckpoint,

@@ -18,8 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-aliyun-rawdb = "aliyun_crawler.rawdb_cli:main"
-aliyun-crawler = "aliyun_crawler.cli:main"
+aliyun-crawler = "aliyun_crawler.cli.app:main"
 
 [tool.uv]
 package = true
