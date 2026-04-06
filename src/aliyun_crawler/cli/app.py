@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+from datetime import datetime
+from pathlib import Path
 
 import uvicorn
 
@@ -9,6 +12,27 @@ from aliyun_crawler.config import CrawlerSettings
 from aliyun_crawler.rawdb.api import create_app
 from aliyun_crawler.rawdb.factory import build_raw_repository
 from aliyun_crawler.rawdb.service import RawIngestService
+
+
+def _setup_logging(log_dir: str | None) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_dir:
+        log_path = Path(log_dir)
+        log_path.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        handlers.append(
+            logging.FileHandler(
+                log_path / f"{timestamp}-crawler.log",
+                encoding="utf-8",
+                delay=True,
+            )
+        )
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -31,6 +55,7 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = CrawlerSettings()
+    _setup_logging(settings.log_dir)
     repository = build_raw_repository(settings)
     service = RawIngestService(settings.to_crawl_config(), repository)
 

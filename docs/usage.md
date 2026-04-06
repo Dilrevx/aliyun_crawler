@@ -57,4 +57,13 @@ DATA_DIR=./output/aliyun_cve
 RAWDB_STORAGE_BACKEND=dual
 RAWDB_API_HOST=127.0.0.1
 RAWDB_API_PORT=8787
+LOG_DIR=./logs
 ```
+
+## Output Locations
+
+- Command JSON result: printed to terminal stdout.
+- Raw files: `output/aliyun_cve/raw/CVE-*.json`.
+- SQLite DB (when backend includes sqlite): `output/aliyun_cve/raw.db`.
+- Page/meta state: `output/aliyun_cve/.rawdb.state.json`.
+- Logs: `logs/*-crawler.log` (or custom path from `LOG_DIR`).

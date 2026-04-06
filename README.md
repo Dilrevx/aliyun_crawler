@@ -59,6 +59,7 @@ cp .env.example .env
 - `RAWDB_STORAGE_BACKEND`: `file` / `sqlite` / `dual`
 - `RAWDB_SQLITE_PATH`: sqlite 路径（可选）
 - `RAWDB_API_HOST`, `RAWDB_API_PORT`: API 监听地址
+- `LOG_DIR`: 日志目录，默认 `./logs`（可用环境变量覆盖）
 
 ## 单一启动命令
 
@@ -91,3 +92,11 @@ uv run aliyun-crawler api
 - `main.py` 现在是薄入口，等价于执行 `uv run aliyun-crawler`。
 - RawDB 是独立模块，支持 `file/sqlite/dual` 后端。
 - 建议生产使用 `dual`，便于兼顾文件可读性与 sqlite 查询性能。
+
+## crawl 结果在哪里
+
+- 终端标准输出：`uv run aliyun-crawler crawl` 会打印本次运行 JSON 结果。
+- 原始数据文件：`output/aliyun_cve/raw/CVE-*.json`
+- SQLite 数据库：`output/aliyun_cve/raw.db`（当后端包含 sqlite）
+- 爬取状态文件：`output/aliyun_cve/.rawdb.state.json`
+- 日志文件：`logs/*-crawler.log`（或 `LOG_DIR` 指定目录）

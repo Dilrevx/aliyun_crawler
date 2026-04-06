@@ -146,8 +146,8 @@ class CrawlerSettings(BaseSettings):
 
     # Logging
     log_dir: Optional[str] = Field(
-        default=None,
-        description="Directory for log files; None means console-only",
+        default="./logs",
+        description="Directory for log files; set empty/unset to disable file logging",
     )
 
     model_config = SettingsConfigDict(
