@@ -11,6 +11,9 @@
 
 ```text
 main.py
+web/
+  src/app/page.tsx
+  .env.local.example
 src/aliyun_crawler/
   cli/
     app.py
@@ -87,11 +90,32 @@ uv run aliyun-crawler api
 - `POST /pages/retry`
 - `POST /crawl/resume`
 
+## Web 前端（Next + Tailwind + React）
+
+```bash
+cd web
+cp .env.local.example .env.local
+npm install
+npm run dev
+```
+
+默认访问：`http://127.0.0.1:3000`
+
+说明：
+- 前端在独立 `web/` 目录，不与后端代码混合。
+- 前端仅通过 HTTP API 访问数据，不直接访问持久化层。
+- 主界面是漏洞浏览器，不是架构说明页。
+- 左侧固定筛选栏 + 统计卡，中间卡片流，右侧抽屉详情。
+- 列表直接展示摘要、CWE、CVSS、PoC 线索、补丁链接和详情。
+- PoC 规则可切 `strict / balanced / loose`。
+- 日期筛选收进高级筛选，默认不占主视觉。
+
 ## 说明
 
 - `main.py` 现在是薄入口，等价于执行 `uv run aliyun-crawler`。
 - RawDB 是独立模块，支持 `file/sqlite/dual` 后端。
 - 建议生产使用 `dual`，便于兼顾文件可读性与 sqlite 查询性能。
+- 爬虫运行中会按页完成即落盘（raw entry + checkpoint + meta），无需等任务整体结束。
 
 ## crawl 结果在哪里
 

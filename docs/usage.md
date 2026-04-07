@@ -65,9 +65,11 @@ Web UI: `http://127.0.0.1:3000`
 
 The browser is optimized for vulnerability triage:
 
+- fixed left filter sidebar with summary stats
 - inline detail cards in the list
+- right-side drawer for full CVE details
 - direct hyperlinks for detail / references / patch URLs
-- PoC status heuristics shown per CVE
+- configurable PoC status heuristics shown per CVE
 - date filters hidden under advanced options
 
 ## Minimal Env Keys
