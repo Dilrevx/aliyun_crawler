@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from aliyun_crawler.rawdb.models import RetryRequest
 from aliyun_crawler.rawdb.repositories import RawRepository
@@ -9,6 +10,13 @@ from aliyun_crawler.rawdb.service import RawIngestService
 
 def create_app(repository: RawRepository, service: RawIngestService) -> FastAPI:
     app = FastAPI(title="Aliyun RawDB API", version="0.1.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health")
     def health() -> dict[str, str]:

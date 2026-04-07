@@ -97,15 +97,21 @@ class FileRawRepository(RawRepository):
 
     def _save_state(self, state: dict) -> None:
         state["updated_at"] = now_iso()
-        self.state_file.write_text(
+        self._atomic_write_text(
+            self.state_file,
             json.dumps(state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
+
+    def _atomic_write_text(self, path: Path, content: str) -> None:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(path)
 
     def upsert_raw(self, entry: RawAVDEntry, *, page: int) -> None:
         path = self.raw_dir / f"{entry.cve_id}.json"
-        path.write_text(
-            entry.model_dump_json(indent=2, exclude_none=True), encoding="utf-8"
+        self._atomic_write_text(
+            path,
+            entry.model_dump_json(indent=2, exclude_none=True),
         )
 
         state = self._load_state()

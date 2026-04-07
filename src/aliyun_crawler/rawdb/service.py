@@ -186,27 +186,34 @@ class RawIngestService:
         *,
         apply_since: bool,
     ) -> list[_PageTaskResult]:
-        tasks = [
-            asyncio.create_task(crawler._fetch_page_bundle_async(ctx, p)) for p in pages
-        ]
-        bundles = await asyncio.gather(*tasks, return_exceptions=True)
+        async def _fetch_page(page: int):
+            try:
+                bundle = await crawler._fetch_page_bundle_async(ctx, page)
+                return page, bundle
+            except Exception as exc:  # keep page context for checkpointing
+                return page, exc
 
-        out: list[_PageTaskResult] = []
-        for idx, bundle in enumerate(bundles):
-            page = pages[idx]
-            if isinstance(bundle, BaseException):
-                msg = str(bundle)
-                checkpoint = PageCheckpoint(
-                    page=page,
-                    status="failed",
-                    entry_count=0,
-                    has_next=True,
-                    error=msg,
-                    updated_at=now_iso(),
-                )
-                self.repository.save_checkpoint(checkpoint)
-                out.append(
-                    _PageTaskResult(
+        tasks_by_page = {p: asyncio.create_task(_fetch_page(p)) for p in pages}
+
+        page_result_map: dict[int, _PageTaskResult] = {}
+        completed_pages: set[int] = set()
+        try:
+            for task in asyncio.as_completed(tasks_by_page.values()):
+                page, bundle = await task
+                completed_pages.add(page)
+
+                if isinstance(bundle, BaseException):
+                    msg = str(bundle)
+                    checkpoint = PageCheckpoint(
+                        page=page,
+                        status="failed",
+                        entry_count=0,
+                        has_next=True,
+                        error=msg,
+                        updated_at=now_iso(),
+                    )
+                    self.repository.save_checkpoint(checkpoint)
+                    page_result_map[page] = _PageTaskResult(
                         page=page,
                         status="failed",
                         entry_count=0,
@@ -214,35 +221,33 @@ class RawIngestService:
                         saved_count=0,
                         error=msg,
                     )
+                    continue
+
+                entries, has_next = bundle
+                saved_count = 0
+                stopped_by_since = False
+                for entry in entries:
+                    if (
+                        apply_since
+                        and crawler._since is not None
+                        and entry.modified_date is not None
+                        and entry.modified_date <= crawler._since
+                    ):
+                        stopped_by_since = True
+                        break
+                    self.repository.upsert_raw(entry, page=page)
+                    saved_count += 1
+
+                checkpoint = PageCheckpoint(
+                    page=page,
+                    status="ok",
+                    entry_count=saved_count,
+                    has_next=has_next,
+                    error=None,
+                    updated_at=now_iso(),
                 )
-                continue
-
-            entries, has_next = bundle
-            saved_count = 0
-            stopped_by_since = False
-            for entry in entries:
-                if (
-                    apply_since
-                    and crawler._since is not None
-                    and entry.modified_date is not None
-                    and entry.modified_date <= crawler._since
-                ):
-                    stopped_by_since = True
-                    break
-                self.repository.upsert_raw(entry, page=page)
-                saved_count += 1
-
-            checkpoint = PageCheckpoint(
-                page=page,
-                status="ok",
-                entry_count=saved_count,
-                has_next=has_next,
-                error=None,
-                updated_at=now_iso(),
-            )
-            self.repository.save_checkpoint(checkpoint)
-            out.append(
-                _PageTaskResult(
+                self.repository.save_checkpoint(checkpoint)
+                page_result_map[page] = _PageTaskResult(
                     page=page,
                     status="ok",
                     entry_count=saved_count,
@@ -250,5 +255,25 @@ class RawIngestService:
                     saved_count=saved_count,
                     stopped_by_since=stopped_by_since,
                 )
-            )
-        return out
+        except asyncio.CancelledError:
+            for page, pending in tasks_by_page.items():
+                if page in completed_pages:
+                    continue
+                if not pending.done():
+                    pending.cancel()
+                self.repository.save_checkpoint(
+                    PageCheckpoint(
+                        page=page,
+                        status="failed",
+                        entry_count=0,
+                        has_next=True,
+                        error="cancelled",
+                        updated_at=now_iso(),
+                    )
+                )
+            raise
+        finally:
+            await asyncio.gather(*tasks_by_page.values(), return_exceptions=True)
+
+        # Keep consumer logic deterministic by returning results in page order.
+        return [page_result_map[p] for p in pages]

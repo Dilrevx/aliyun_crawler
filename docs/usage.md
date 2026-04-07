@@ -48,6 +48,28 @@ uv run aliyun-crawler retry --pages 50 51 52
 uv run aliyun-crawler api
 ```
 
+Then open:
+
+- `http://127.0.0.1:8787/docs` for OpenAPI docs
+
+### Start standalone web UI
+
+```bash
+cd web
+cp .env.local.example .env.local
+npm install
+npm run dev
+```
+
+Web UI: `http://127.0.0.1:3000`
+
+The browser is optimized for vulnerability triage:
+
+- inline detail cards in the list
+- direct hyperlinks for detail / references / patch URLs
+- PoC status heuristics shown per CVE
+- date filters hidden under advanced options
+
 ## Minimal Env Keys
 
 ```env
