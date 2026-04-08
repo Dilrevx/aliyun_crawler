@@ -52,6 +52,15 @@ const API_BASE =
 type PocMode = "all" | "yes" | "no";
 type PoCRuleMode = "balanced" | "strict" | "loose";
 
+type SmartSearchTokens = {
+    text: string[];
+    cve: string;
+    cwe: string;
+    severity: string;
+    patch: PocMode;
+    poc: PocMode;
+};
+
 async function apiGet<T>(path: string): Promise<T> {
     const response = await fetch(`${API_BASE}${path}`);
     if (!response.ok) {
@@ -135,14 +144,64 @@ function unique<T>(items: T[]) {
     return Array.from(new Set(items));
 }
 
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+    const [debounced, setDebounced] = useState(value);
+    useEffect(() => {
+        const id = window.setTimeout(() => setDebounced(value), delayMs);
+        return () => window.clearTimeout(id);
+    }, [value, delayMs]);
+    return debounced;
+}
+
+function parseSmartSearch(raw: string): SmartSearchTokens {
+    const result: SmartSearchTokens = {
+        text: [],
+        cve: "",
+        cwe: "",
+        severity: "",
+        patch: "all",
+        poc: "all",
+    };
+
+    const tokens = raw
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+
+    for (const token of tokens) {
+        const lower = token.toLowerCase();
+        if (lower.startsWith("cve:")) {
+            result.cve = lower.slice(4);
+            continue;
+        }
+        if (lower.startsWith("cwe:")) {
+            result.cwe = lower.slice(4);
+            continue;
+        }
+        if (lower.startsWith("sev:")) {
+            result.severity = lower.slice(4);
+            continue;
+        }
+        if (lower === "patch:yes" || lower === "patch:no") {
+            result.patch = lower.endsWith("yes") ? "yes" : "no";
+            continue;
+        }
+        if (lower === "poc:yes" || lower === "poc:no") {
+            result.poc = lower.endsWith("yes") ? "yes" : "no";
+            continue;
+        }
+        result.text.push(lower);
+    }
+
+    return result;
+}
+
 export default function Home() {
     const [query, setQuery] = useState<QueryResp | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
 
-    const [keyword, setKeyword] = useState("");
-    const [cwe, setCwe] = useState("");
-    const [severity, setSeverity] = useState("");
+    const [search, setSearch] = useState("");
     const [patchOnly, setPatchOnly] = useState<PocMode>("all");
     const [pocOnly, setPocOnly] = useState<PocMode>("all");
     const [pocRuleMode, setPocRuleMode] = useState<PoCRuleMode>("balanced");
@@ -162,6 +221,9 @@ export default function Home() {
     const [retryPages, setRetryPages] = useState("");
     const [retryResult, setRetryResult] = useState<string>("{}");
 
+    const debouncedSearch = useDebouncedValue(search, 350);
+    const searchTokens = useMemo(() => parseSmartSearch(debouncedSearch), [debouncedSearch]);
+
     const filteredItems = useMemo(() => {
         return (query?.items || []).filter((item) => {
             const pool = [
@@ -179,20 +241,29 @@ export default function Home() {
                 .join(" ")
                 .toLowerCase();
 
-            if (keyword && !pool.includes(keyword.toLowerCase())) return false;
-            if (cwe && (item.cwe_id || "").toLowerCase() !== cwe.toLowerCase()) return false;
-            if (severity && (item.severity || "").toLowerCase() !== severity.toLowerCase()) {
-                return false;
+            if (searchTokens.text.length) {
+                const ok = searchTokens.text.every((token) => pool.includes(token));
+                if (!ok) return false;
             }
+
+            if (searchTokens.cve && !item.cve_id.toLowerCase().includes(searchTokens.cve)) return false;
+            if (searchTokens.cwe && !(item.cwe_id || "").toLowerCase().includes(searchTokens.cwe)) return false;
+            if (searchTokens.severity && !(item.severity || "").toLowerCase().includes(searchTokens.severity)) return false;
+
             if (patchOnly === "yes" && !(item.patch_urls || []).length) return false;
             if (patchOnly === "no" && (item.patch_urls || []).length > 0) return false;
+
+            if (searchTokens.patch === "yes" && !(item.patch_urls || []).length) return false;
+            if (searchTokens.patch === "no" && (item.patch_urls || []).length > 0) return false;
 
             const poc = summarizePoc(item, pocRuleMode).label;
             if (pocOnly === "yes" && poc === "未见 PoC 线索") return false;
             if (pocOnly === "no" && poc !== "未见 PoC 线索") return false;
+            if (searchTokens.poc === "yes" && poc === "未见 PoC 线索") return false;
+            if (searchTokens.poc === "no" && poc !== "未见 PoC 线索") return false;
             return true;
         });
-    }, [query, keyword, cwe, severity, patchOnly, pocOnly, pocRuleMode]);
+    }, [query, searchTokens, patchOnly, pocOnly, pocRuleMode]);
 
     const stats = useMemo(() => {
         const patchCount = filteredItems.filter((x) => (x.patch_urls || []).length > 0).length;
@@ -212,22 +283,6 @@ export default function Home() {
     }, [filteredItems, pocRuleMode]);
 
     const totalPages = Math.max(1, Math.ceil((query?.total ?? 0) / pageSize));
-
-    const severityBreakdown = useMemo(() => {
-        const counts = {
-            critical: filteredItems.filter((x) => riskTone(x.severity) === "critical").length,
-            high: filteredItems.filter((x) => riskTone(x.severity) === "high").length,
-            medium: filteredItems.filter((x) => riskTone(x.severity) === "medium").length,
-            low: filteredItems.filter((x) => riskTone(x.severity) === "low").length,
-        };
-        const total = Math.max(1, counts.critical + counts.high + counts.medium + counts.low);
-        return [
-            { key: "critical", label: "严重", count: counts.critical, tone: "critical" as const, pct: (counts.critical / total) * 100 },
-            { key: "high", label: "高危", count: counts.high, tone: "high" as const, pct: (counts.high / total) * 100 },
-            { key: "medium", label: "中危", count: counts.medium, tone: "medium" as const, pct: (counts.medium / total) * 100 },
-            { key: "low", label: "低危", count: counts.low, tone: "low" as const, pct: (counts.low / total) * 100 },
-        ];
-    }, [filteredItems]);
 
     async function runQuery(targetPage = page, targetPageSize = pageSize) {
         setLoading(true);
@@ -251,12 +306,31 @@ export default function Home() {
     }
 
     useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const startPage = Number(params.get("page") || "1");
+        const startPageSize = Number(params.get("page_size") || "20");
+        const startFrom = params.get("modified_from") || "";
+        const startTo = params.get("modified_to") || "";
+        const startSearch = params.get("q") || "";
+        const startPatch = (params.get("patch") as PocMode) || "all";
+        const startPoc = (params.get("poc") as PocMode) || "all";
+        const startRule = (params.get("poc_rule") as PoCRuleMode) || "balanced";
+        const startAdvanced = params.get("advanced") === "1";
+
+        setSearch(startSearch);
+        setPatchOnly(startPatch === "yes" || startPatch === "no" ? startPatch : "all");
+        setPocOnly(startPoc === "yes" || startPoc === "no" ? startPoc : "all");
+        setPocRuleMode(startRule === "strict" || startRule === "loose" ? startRule : "balanced");
+        setShowAdvanced(startAdvanced);
+        setFrom(startFrom);
+        setTo(startTo);
+
         let mounted = true;
         async function initQuery() {
             setLoading(true);
             setError("");
             try {
-                const data = await apiGet<QueryResp>("/raw?page=1&page_size=20");
+                const data = await apiGet<QueryResp>(`/raw?page=${Math.max(1, startPage || 1)}&page_size=${[10, 20, 50, 100].includes(startPageSize) ? startPageSize : 20}${startFrom ? `&modified_from=${encodeURIComponent(startFrom)}` : ""}${startTo ? `&modified_to=${encodeURIComponent(startTo)}` : ""}`);
                 if (!mounted) return;
                 setQuery(data);
                 setPage(data.page);
@@ -273,6 +347,20 @@ export default function Home() {
             mounted = false;
         };
     }, []);
+
+    useEffect(() => {
+        const params = new URLSearchParams();
+        params.set("page", String(page));
+        params.set("page_size", String(pageSize));
+        if (showAdvanced) params.set("advanced", "1");
+        if (showAdvanced && from) params.set("modified_from", from);
+        if (showAdvanced && to) params.set("modified_to", to);
+        if (search.trim()) params.set("q", search.trim());
+        if (patchOnly !== "all") params.set("patch", patchOnly);
+        if (pocOnly !== "all") params.set("poc", pocOnly);
+        if (pocRuleMode !== "balanced") params.set("poc_rule", pocRuleMode);
+        window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+    }, [page, pageSize, showAdvanced, from, to, search, patchOnly, pocOnly, pocRuleMode]);
 
     async function openDetail(item: RawItem) {
         setSelected(item);
@@ -334,166 +422,89 @@ export default function Home() {
 
     const rows = filteredItems;
 
+    function resetFilters() {
+        setSearch("");
+        setPatchOnly("all");
+        setPocOnly("all");
+        setPocRuleMode("balanced");
+        setFrom("");
+        setTo("");
+        setShowAdvanced(false);
+    }
+
     return (
         <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.18),_transparent_30%),linear-gradient(180deg,#f8fbff_0%,#eef2ff_100%)] text-slate-900">
             <main className="mx-auto max-w-[1700px] px-4 py-5 lg:px-6">
-                <section className="relative overflow-hidden rounded-[28px] border border-white/70 bg-slate-950 px-6 py-5 text-white shadow-[0_24px_80px_rgba(15,23,42,0.22)]">
-                    <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(56,189,248,0.35),transparent_30%),radial-gradient(circle_at_bottom_left,rgba(59,130,246,0.28),transparent_25%)]" />
-                    <div className="relative flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-                        <div className="max-w-4xl">
-                            <p className="text-xs uppercase tracking-[0.35em] text-sky-200/70">Aliyun CVE Browser</p>
-                            <h1 className="mt-3 text-3xl font-semibold tracking-tight md:text-5xl">CVE 浏览、筛选、补漏，一页完成。</h1>
-                            <p className="mt-3 text-sm leading-6 text-slate-200/80 md:text-base">
-                                先看统计，再缩范围，最后进入详情。右侧保留服务器状态和危险分布，主区域只保留核心结果。
-                            </p>
-                            <div className="mt-4 flex flex-wrap gap-2">
-                                <StatPill label="总数" value={query?.total ?? 0} />
-                                <StatPill label="可见" value={rows.length} />
-                                <StatPill label="高危" value={stats.highCount} tone="high" />
-                                <StatPill label="严重" value={stats.criticalCount} tone="critical" />
-                                <StatPill label="PoC" value={stats.pocCount} tone="warning" />
-                            </div>
-                        </div>
-                        <div className="grid min-w-[280px] gap-3 rounded-[22px] border border-white/10 bg-white/8 p-4 backdrop-blur">
-                            <div className="flex items-center justify-between gap-3 text-xs uppercase tracking-[0.2em] text-slate-300">
-                                <span>Server</span>
-                                <span className={`rounded-full px-2 py-1 ${loading ? "bg-amber-500/20 text-amber-200" : "bg-emerald-500/20 text-emerald-200"}`}>
-                                    {loading ? "同步中" : "在线"}
-                                </span>
-                            </div>
-                            <div className="space-y-1 text-sm text-slate-200">
-                                <div className="truncate text-slate-300">{API_BASE}</div>
-                                <div className="flex items-center justify-between text-slate-300">
-                                    <span>Page</span>
-                                    <span>{query?.page ?? page}/{totalPages}</span>
-                                </div>
-                                <div className="flex items-center justify-between text-slate-300">
-                                    <span>Page Size</span>
-                                    <span>{query?.page_size ?? pageSize}</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
-                <div className="mt-5 grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
-                    <aside className="sticky top-4 self-start rounded-[28px] border border-slate-200 bg-white/90 p-4 shadow-[0_18px_55px_rgba(15,23,42,0.08)] backdrop-blur">
+                <div className="mt-5 grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
+                    <aside className="sticky top-4 self-start rounded-xl border border-slate-200 bg-white p-3 shadow-[0_8px_25px_rgba(15,23,42,0.06)]">
                         <div className="flex items-center justify-between gap-2">
                             <div>
-                                <h2 className="text-lg font-semibold">筛选</h2>
-                                <p className="text-sm text-slate-500">先缩范围，再看详情。</p>
+                                <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-600">Filters</h2>
+                                <p className="text-xs text-slate-500">支持语法检索与快速筛选</p>
                             </div>
                             <button
-                                className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700"
+                                className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-medium text-slate-700"
                                 onClick={() => setShowAdvanced((v) => !v)}
                             >
                                 {showAdvanced ? "收起" : "高级"}
                             </button>
                         </div>
 
-                        <div className="mt-4 rounded-3xl bg-slate-950 p-4 text-white">
-                            <div className="flex items-center justify-between text-xs uppercase tracking-widest text-slate-400">
-                                <span>Server</span>
-                                <span>{loading ? "busy" : "ready"}</span>
-                            </div>
-                            <div className="mt-2 space-y-2 text-sm text-slate-200">
-                                <div className="truncate text-slate-300">{API_BASE}</div>
-                                <div className="flex items-center justify-between">
-                                    <span>total</span>
-                                    <span>{query?.total ?? 0}</span>
-                                </div>
-                                <div className="flex items-center justify-between">
-                                    <span>page</span>
-                                    <span>{query?.page ?? page}/{totalPages}</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="mt-4 rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                        <div className="mt-3 rounded border border-slate-200 bg-slate-50 px-2 py-2 text-[11px] text-slate-600">
                             <div className="flex items-center justify-between gap-2">
-                                <div>
-                                    <div className="text-xs uppercase tracking-widest text-slate-500">Severity</div>
-                                    <div className="text-sm font-medium text-slate-800">分布饼图</div>
-                                </div>
-                                <div className="text-xs text-slate-500">{filteredItems.length} 条</div>
+                                <span className="truncate">{API_BASE}</span>
+                                <span className={`rounded-full px-2 py-0.5 ${loading ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                                    {loading ? "同步中" : "在线"}
+                                </span>
                             </div>
-                            <SeverityPie segments={severityBreakdown} />
-                            <div className="mt-3 space-y-2">
-                                {severityBreakdown.map((item) => (
-                                    <div key={item.key} className="flex items-center justify-between text-sm text-slate-700">
-                                        <span className="flex items-center gap-2">
-                                            <span className={`h-2.5 w-2.5 rounded-full ${toneDotClass(item.tone)}`} />
-                                            {item.label}
-                                        </span>
-                                        <span>{item.count}</span>
-                                    </div>
-                                ))}
+                            <div className="mt-1 flex items-center justify-between text-slate-500">
+                                <span>{query?.total ?? 0} total</span>
+                                <span>{query?.page ?? page}/{totalPages}</span>
                             </div>
                         </div>
 
-                        <div className="mt-4 space-y-3">
-                            <input className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-400 focus:bg-white" placeholder="关键词 / CVE / 链接" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
-                            <input className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-400 focus:bg-white" placeholder="CWE-79" value={cwe} onChange={(e) => setCwe(e.target.value)} />
-                            <input className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-400 focus:bg-white" placeholder="high / medium / 高危" value={severity} onChange={(e) => setSeverity(e.target.value)} />
+                        <div className="mt-3 space-y-2">
+                            <input
+                                className="w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                                placeholder="高级检索: cve:CVE-2024 cwe:79 sev:high patch:yes poc:no nginx"
+                                value={search}
+                                onChange={(e) => setSearch(e.target.value)}
+                            />
 
                             <div className="grid grid-cols-2 gap-3">
-                                <select className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 outline-none focus:border-blue-400 focus:bg-white" value={patchOnly} onChange={(e) => setPatchOnly(e.target.value as PocMode)}>
-                                    <option value="all">Patch: all</option>
-                                    <option value="yes">Patch: yes</option>
-                                    <option value="no">Patch: no</option>
+                                <select className="rounded border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400" value={patchOnly} onChange={(e) => setPatchOnly(e.target.value as PocMode)}>
+                                    <option value="all">Patch 全部</option>
+                                    <option value="yes">仅有 Patch</option>
+                                    <option value="no">无 Patch</option>
                                 </select>
-                                <select className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 outline-none focus:border-blue-400 focus:bg-white" value={pocOnly} onChange={(e) => setPocOnly(e.target.value as PocMode)}>
-                                    <option value="all">PoC: all</option>
-                                    <option value="yes">PoC: yes</option>
-                                    <option value="no">PoC: no</option>
+                                <select className="rounded border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400" value={pocOnly} onChange={(e) => setPocOnly(e.target.value as PocMode)}>
+                                    <option value="all">PoC 全部</option>
+                                    <option value="yes">仅 PoC</option>
+                                    <option value="no">无 PoC</option>
                                 </select>
                             </div>
 
-                            <select className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 outline-none focus:border-blue-400 focus:bg-white" value={pocRuleMode} onChange={(e) => setPocRuleMode(e.target.value as PoCRuleMode)}>
-                                <option value="balanced">PoC rule: balanced</option>
-                                <option value="strict">PoC rule: strict</option>
-                                <option value="loose">PoC rule: loose</option>
+                            <select className="w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400" value={pocRuleMode} onChange={(e) => setPocRuleMode(e.target.value as PoCRuleMode)}>
+                                <option value="balanced">PoC 规则: balanced</option>
+                                <option value="strict">PoC 规则: strict</option>
+                                <option value="loose">PoC 规则: loose</option>
                             </select>
 
                             {showAdvanced ? (
-                                <div className="grid gap-3 rounded-3xl bg-slate-50 p-3">
-                                    <input className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-blue-400" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-                                    <input className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-blue-400" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+                                <div className="grid gap-2 rounded border border-slate-200 bg-slate-50 p-2">
+                                    <input className="w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+                                    <input className="w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
                                 </div>
                             ) : null}
                         </div>
 
                         <div className="mt-4 grid grid-cols-2 gap-2">
+                            <button className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700" onClick={() => { resetFilters(); void runQuery(1, pageSize); }}>
+                                清空
+                            </button>
                             <button className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-medium text-white transition hover:bg-blue-500" onClick={() => runQuery(1, pageSize)}>
-                                {loading ? "Loading..." : "刷新"}
+                                {loading ? "Loading..." : "应用"}
                             </button>
-                            <button className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700" onClick={() => void runQuery(Math.max(1, page - 1), pageSize)}>
-                                上一页
-                            </button>
-                            <button className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700" onClick={() => void runQuery(Math.min(totalPages, page + 1), pageSize)}>
-                                下一页
-                            </button>
-                            <select
-                                className="rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm outline-none focus:border-blue-400"
-                                value={page}
-                                onChange={(e) => void runQuery(Number(e.target.value), pageSize)}
-                            >
-                                {Array.from({ length: totalPages }, (_, index) => index + 1).map((value) => (
-                                    <option key={value} value={value}>
-                                        第 {value} 页
-                                    </option>
-                                ))}
-                            </select>
-                            <select
-                                className="col-span-2 rounded-2xl border border-slate-200 bg-white px-3 py-3 text-sm outline-none focus:border-blue-400"
-                                value={pageSize}
-                                onChange={(e) => void runQuery(1, Number(e.target.value))}
-                            >
-                                <option value={10}>每页 10 条</option>
-                                <option value={20}>每页 20 条</option>
-                                <option value={50}>每页 50 条</option>
-                                <option value={100}>每页 100 条</option>
-                            </select>
                         </div>
                         <div className="mt-2 text-xs text-slate-500">page {query?.page ?? page} / total {query?.total ?? 0}</div>
                         {error ? <p className="mt-2 text-sm text-rose-600">{error}</p> : null}
@@ -525,14 +536,35 @@ export default function Home() {
                     </aside>
 
                     <section className="space-y-4">
-                        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[28px] border border-slate-200 bg-white/90 px-4 py-3 shadow-[0_18px_55px_rgba(15,23,42,0.08)] backdrop-blur">
+                        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[18px] border border-slate-200 bg-white/90 px-4 py-3 shadow-[0_18px_55px_rgba(15,23,42,0.08)] backdrop-blur">
                             <div>
                                 <h2 className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-500">Results</h2>
-                                <p className="text-sm text-slate-500">按行展示核心信息，减少无效占位。</p>
                             </div>
                             <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
                                 <span className="rounded-full bg-slate-100 px-3 py-1">{rows.length} visible</span>
-                                <span className="rounded-full bg-slate-100 px-3 py-1">page {query?.page ?? page}/{totalPages}</span>
+                                <span className="rounded-full bg-slate-100 px-3 py-1">高危 {stats.highCount}</span>
+                                <span className="rounded-full bg-slate-100 px-3 py-1">严重 {stats.criticalCount}</span>
+                                <select
+                                    className="rounded border border-slate-200 bg-white px-2 py-1 text-xs"
+                                    value={page}
+                                    onChange={(e) => void runQuery(Number(e.target.value), pageSize)}
+                                >
+                                    {Array.from({ length: totalPages }, (_, index) => index + 1).map((value) => (
+                                        <option key={value} value={value}>
+                                            第 {value} 页
+                                        </option>
+                                    ))}
+                                </select>
+                                <select
+                                    className="rounded border border-slate-200 bg-white px-2 py-1 text-xs"
+                                    value={pageSize}
+                                    onChange={(e) => void runQuery(1, Number(e.target.value))}
+                                >
+                                    <option value={10}>10/页</option>
+                                    <option value={20}>20/页</option>
+                                    <option value={50}>50/页</option>
+                                    <option value={100}>100/页</option>
+                                </select>
                             </div>
                         </div>
 
@@ -542,7 +574,6 @@ export default function Home() {
                                 const sevTone = riskTone(item.severity);
                                 const refs = unique((item.references || []).filter(Boolean)).slice(0, 8);
                                 const patches = unique((item.patch_urls || []).filter(Boolean));
-                                const affected = item.affected_software || [];
                                 const cweText = [item.cwe_id || "-", item.cwe_description || "-"]
                                     .filter(Boolean)
                                     .join(" | ");
@@ -551,27 +582,27 @@ export default function Home() {
                                 return (
                                     <article key={item.cve_id} className="px-4 py-4 md:px-5 md:py-4">
                                         <div className="flex flex-wrap items-start gap-2">
-                                            <h3 className="text-lg font-semibold text-slate-950">{item.cve_id}</h3>
+                                            <h3 className="text-base font-semibold text-slate-950">
+                                                {item.title || "无标题"}
+                                                <span className="ml-2 font-mono text-xs text-slate-500">{item.cve_id}</span>
+                                            </h3>
                                             <span className={`rounded-full px-2.5 py-0.5 text-xs ring-1 ${toneClass(sevTone)}`}>{item.severity || "unknown"}</span>
                                             <span className={`rounded-full px-2.5 py-0.5 text-xs ring-1 ${toneClass(poc.tone)}`}>{poc.label}</span>
                                             {patches.length ? <span className="rounded-full bg-slate-900 px-2.5 py-0.5 text-xs text-white">patch {patches.length}</span> : null}
                                             <div className="ml-auto flex flex-wrap gap-2">
-                                                <button className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700" onClick={() => openDetail(item)}>查看详情</button>
+                                                <button className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700" onClick={() => openDetail(item)}>展开</button>
                                                 {item.detail_url ? (
-                                                    <a className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700" href={item.detail_url} target="_blank" rel="noreferrer">原始详情</a>
+                                                    <a className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700" href={item.detail_url} target="_blank" rel="noreferrer">跳转</a>
                                                 ) : null}
                                             </div>
                                         </div>
 
-                                        <p className="mt-1 text-sm text-slate-600">{item.title || "无标题"}</p>
-
                                         <div className="mt-3 space-y-2 text-sm leading-6 text-slate-700">
-                                            <CollapsibleText label="简介" text={item.description || "暂无描述"} lines={2} />
+                                            <PlainSummary text={item.description || "暂无描述"} lines={2} />
                                             <div className="grid gap-2 md:grid-cols-2">
                                                 <LabeledLine label="CWE" text={cweText} />
                                                 <LabeledLine label="CVSS" text={cvssText} mono />
                                             </div>
-                                            <LabeledLine label="Affected Software" text={affected.length ? affected.join(" | ") : "-"} />
                                             <div className="grid gap-3 md:grid-cols-2">
                                                 <UrlList title="引用链接（原始）" urls={refs} />
                                                 <UrlList title="补丁链接（提取）" urls={patches} />
@@ -586,6 +617,36 @@ export default function Home() {
                                     没有匹配结果，换个关键词或放宽过滤条件。
                                 </div>
                             ) : null}
+                        </div>
+
+                        <div className="flex justify-end gap-2">
+                            <button className="rounded border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700" onClick={() => void runQuery(Math.max(1, page - 1), pageSize)}>
+                                上一页
+                            </button>
+                            <button className="rounded border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700" onClick={() => void runQuery(Math.min(totalPages, page + 1), pageSize)}>
+                                下一页
+                            </button>
+                            <select
+                                className="rounded border border-slate-200 bg-white px-2 py-1.5 text-xs"
+                                value={page}
+                                onChange={(e) => void runQuery(Number(e.target.value), pageSize)}
+                            >
+                                {Array.from({ length: totalPages }, (_, index) => index + 1).map((value) => (
+                                    <option key={value} value={value}>
+                                        第 {value} 页
+                                    </option>
+                                ))}
+                            </select>
+                            <select
+                                className="rounded border border-slate-200 bg-white px-2 py-1.5 text-xs"
+                                value={pageSize}
+                                onChange={(e) => void runQuery(1, Number(e.target.value))}
+                            >
+                                <option value={10}>10/页</option>
+                                <option value={20}>20/页</option>
+                                <option value={50}>50/页</option>
+                                <option value={100}>100/页</option>
+                            </select>
                         </div>
                     </section>
                 </div>
@@ -662,54 +723,6 @@ export default function Home() {
     );
 }
 
-function StatPill({ label, value, tone = "muted" }: { label: string; value: number; tone?: "critical" | "high" | "medium" | "low" | "warning" | "info" | "muted" }) {
-    return (
-        <div className={`rounded-full px-3 py-2 text-sm ring-1 ${toneClass(tone)}`}>
-            <span className="text-[11px] uppercase tracking-widest opacity-70">{label}</span>
-            <span className="ml-2 text-base font-semibold">{value}</span>
-        </div>
-    );
-}
-
-function toneDotClass(kind: "critical" | "high" | "medium" | "low" | "warning" | "info" | "muted") {
-    switch (kind) {
-        case "critical":
-            return "bg-rose-500";
-        case "high":
-            return "bg-amber-500";
-        case "medium":
-            return "bg-sky-500";
-        case "low":
-            return "bg-emerald-500";
-        default:
-            return "bg-slate-400";
-    }
-}
-
-function SeverityPie({ segments }: { segments: Array<{ key: string; label: string; count: number; tone: "critical" | "high" | "medium" | "low" | "warning" | "info" | "muted"; pct: number }> }) {
-    const colors = ["#f43f5e", "#f59e0b", "#0ea5e9", "#10b981"];
-    const gradientStops: string[] = [];
-    let accumulated = 0;
-    segments.forEach((segment, index) => {
-        const start = accumulated;
-        accumulated += segment.pct;
-        gradientStops.push(`${colors[index]} ${start}% ${accumulated}%`);
-    });
-    return (
-        <div className="mt-3 grid place-items-center">
-            <div className="relative h-40 w-40 rounded-full" style={{ background: `conic-gradient(${gradientStops.join(", ")})` }}>
-                <div className="absolute inset-7 rounded-full bg-slate-50" />
-                <div className="absolute inset-0 grid place-items-center text-center">
-                    <div>
-                        <div className="text-2xl font-semibold text-slate-900">{segments.reduce((sum, item) => sum + item.count, 0)}</div>
-                        <div className="text-xs uppercase tracking-widest text-slate-500">items</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
-}
-
 function CollapsibleText({ label, text, lines = 2, mono = false }: { label: string; text: string; lines?: number; mono?: boolean }) {
     const [expanded, setExpanded] = useState(false);
     const clampClass = lines === 1 ? "line-clamp-1" : lines === 2 ? "line-clamp-2" : "line-clamp-3";
@@ -717,21 +730,42 @@ function CollapsibleText({ label, text, lines = 2, mono = false }: { label: stri
 
     return (
         <div className="text-sm leading-6 text-slate-700">
-            <p className="text-sm leading-6 text-slate-700">
+            <div className="flex items-end gap-1 text-sm leading-6 text-slate-700">
                 <strong className="font-semibold text-slate-900">{label}: </strong>
-                <span className={`${mono ? "font-mono text-[13px]" : ""} ${expanded ? "" : clampClass}`}>
+                <span className={`min-w-0 flex-1 ${mono ? "font-mono text-[13px]" : ""} ${expanded ? "" : clampClass}`}>
                     {text || "-"}
                 </span>
                 {canExpand ? (
                     <button
                         type="button"
-                        className="ml-2 text-xs font-medium text-blue-600 hover:text-blue-500"
+                        className="shrink-0 text-xs font-medium text-blue-600 hover:text-blue-500"
                         onClick={() => setExpanded((v) => !v)}
                     >
                         {expanded ? "收起" : "展开"}
                     </button>
                 ) : null}
-            </p>
+            </div>
+        </div>
+    );
+}
+
+function PlainSummary({ text, lines = 2 }: { text: string; lines?: number }) {
+    const [expanded, setExpanded] = useState(false);
+    const clampClass = lines === 1 ? "line-clamp-1" : lines === 2 ? "line-clamp-2" : "line-clamp-3";
+    const canExpand = (text || "").length > (lines === 1 ? 80 : lines === 2 ? 140 : 220);
+
+    return (
+        <div className="flex items-end gap-1 text-sm leading-6 text-slate-600">
+            <span className={`min-w-0 flex-1 ${expanded ? "" : clampClass}`}>{text || "-"}</span>
+            {canExpand ? (
+                <button
+                    type="button"
+                    className="shrink-0 text-xs font-medium text-blue-600 hover:text-blue-500"
+                    onClick={() => setExpanded((v) => !v)}
+                >
+                    {expanded ? "收起" : "展开"}
+                </button>
+            ) : null}
         </div>
     );
 }
@@ -759,39 +793,41 @@ function trimUrl(url: string, keep = 52) {
 
 function UrlList({ title, urls, limit = 4 }: { title: string; urls: string[]; limit?: number }) {
     const [expanded, setExpanded] = useState(false);
-    const show = expanded ? urls : urls.slice(0, limit);
+    const canExpand = urls.length > limit;
     return (
         <div>
             <div className="text-xs uppercase tracking-widest text-slate-500">{title}</div>
-            {show.length ? (
-                <div className={`mt-2 text-xs leading-5 text-slate-700 ${expanded ? "" : "line-clamp-2"}`}>
-                    {show.map((url, index) => (
-                        <span key={url}>
-                            <a
-                                href={url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="underline decoration-slate-300 underline-offset-2 hover:text-blue-700"
-                                title={url}
-                            >
-                                {trimUrl(url)}
-                            </a>
-                            {index < show.length - 1 ? <span className="mx-1 text-slate-400">·</span> : null}
-                        </span>
-                    ))}
+            {urls.length ? (
+                <div className="mt-2 flex items-end gap-1">
+                    <div className={`min-w-0 flex-1 text-xs leading-5 text-slate-700 ${expanded ? "" : "line-clamp-2"}`}>
+                        {urls.map((url, index) => (
+                            <p key={url}>
+                                <a
+                                    href={url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="underline decoration-slate-300 underline-offset-2 hover:text-blue-700"
+                                    title={url}
+                                >
+                                    {trimUrl(url)}
+                                </a>
+                                {index < urls.length - 1 ? <span className="mx-1 text-slate-400">·</span> : null}
+                            </p>
+                        ))}
+                    </div>
+                    {canExpand ? (
+                        <button
+                            type="button"
+                            className="shrink-0 text-xs font-medium text-blue-600 hover:text-blue-500"
+                            onClick={() => setExpanded((v) => !v)}
+                        >
+                            {expanded ? "收起" : "展开"}
+                        </button>
+                    ) : null}
                 </div>
             ) : (
                 <p className="text-sm text-slate-500">-</p>
             )}
-            {urls.length > limit ? (
-                <button
-                    type="button"
-                    className="mt-1 text-xs font-medium text-blue-600 hover:text-blue-500"
-                    onClick={() => setExpanded((v) => !v)}
-                >
-                    {expanded ? "收起" : `展开 ${urls.length - limit} 条`}
-                </button>
-            ) : null}
         </div>
     );
 }
