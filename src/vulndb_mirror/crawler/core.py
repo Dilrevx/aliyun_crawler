@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
 import time
@@ -64,6 +65,10 @@ _USER_AGENT = (
 )
 
 
+class ListPageFetchError(RuntimeError):
+    """Raised when a list page cannot be fetched/rendered."""
+
+
 def _parse_date(text: str) -> Optional[datetime]:
     text = text.strip()
     for fmt in _DATE_FORMATS:
@@ -77,6 +82,20 @@ def _parse_date(text: str) -> Optional[datetime]:
 def _extract_patch_urls(urls: list[str]) -> list[str]:
     """Return only URLs that look like GitHub commit / PR / issue links."""
     return [u for u in urls if _GITHUB_ANY_RE.search(u)]
+
+
+def _proxy_env_snapshot() -> dict[str, str]:
+    keys = (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    )
+    return {k: os.environ.get(k, "") for k in keys if os.environ.get(k)}
 
 
 class AVDCrawler:
@@ -94,10 +113,28 @@ class AVDCrawler:
         self.config = config or CrawlConfig()
         self._page: Optional[Page] = None
         self._since: Optional[datetime] = None
+        self._browser_engine = (self.config.browser_engine or "chromium").lower()
+        if self._browser_engine not in {"chromium", "firefox", "webkit"}:
+            raise ValueError(
+                "Unsupported browser_engine: "
+                f"{self.config.browser_engine!r}; expected chromium|firefox|webkit"
+            )
         if self.config.since:
             self._since = _parse_date(self.config.since)
             if self._since is None:
                 logger.warning("Could not parse 'since' date: %s", self.config.since)
+
+    def _async_browser_type(self, playwright):
+        return getattr(playwright, self._browser_engine)
+
+    def _sync_browser_type(self, playwright):
+        return getattr(playwright, self._browser_engine)
+
+    def _launch_kwargs(self) -> dict[str, object]:
+        kwargs: dict[str, object] = {"headless": self.config.headless}
+        if self._browser_engine == "chromium":
+            kwargs["args"] = _BROWSER_ARGS
+        return kwargs
 
     # ------------------------------------------------------------------
     # Public API
@@ -126,17 +163,17 @@ class AVDCrawler:
         concurrency = max(1, getattr(self.config, "page_concurrency", 1))
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=self.config.headless,
-                args=_BROWSER_ARGS,
-            )
+            browser_type = self._async_browser_type(p)
+            browser = await browser_type.launch(**self._launch_kwargs())
             try:
                 ctx = await browser.new_context(
                     user_agent=_USER_AGENT,
                     viewport={"width": 1280, "height": 800},
                     locale="zh-CN",
                 )
-                if hasattr(_STEALTH, "apply_stealth_async"):
+                if self._browser_engine == "chromium" and hasattr(
+                    _STEALTH, "apply_stealth_async"
+                ):
                     await _STEALTH.apply_stealth_async(ctx)  # type: ignore[attr-defined]
 
                 page_num = 1
@@ -153,6 +190,16 @@ class AVDCrawler:
                         for pnum in window_pages
                     ]
                     bundles = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    if page_num == 1 and all(
+                        isinstance(item, ListPageFetchError) for item in bundles
+                    ):
+                        detail = " | ".join(str(item) for item in bundles)
+                        raise RuntimeError(
+                            "All initial list page requests failed. "
+                            f"Likely browser-network issue (proxy/egress/WAF). details={detail}; "
+                            f"proxy_env={_proxy_env_snapshot()}"
+                        )
 
                     by_page: dict[int, tuple[list[RawAVDEntry], bool]] = {}
                     for i, result in enumerate(bundles):
@@ -242,7 +289,7 @@ class AVDCrawler:
             soup = await self._render_async(page, url)
         except Exception as exc:
             logger.error("Failed to fetch list page %d: %s", page_num, exc)
-            return [], False
+            raise ListPageFetchError(f"page={page_num} url={url} err={exc}") from exc
 
         entries = self._parse_list_page(soup)
         has_next = self._has_next_page(soup)
@@ -283,17 +330,16 @@ class AVDCrawler:
     @contextmanager
     def _browser_context(self) -> Iterator[BrowserContext]:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=self.config.headless,
-                args=_BROWSER_ARGS,
-            )
+            browser_type = self._sync_browser_type(p)
+            browser = browser_type.launch(**self._launch_kwargs())
             try:
                 ctx = browser.new_context(
                     user_agent=_USER_AGENT,
                     viewport={"width": 1280, "height": 800},
                     locale="zh-CN",
                 )
-                _STEALTH.apply_stealth_sync(ctx)
+                if self._browser_engine == "chromium":
+                    _STEALTH.apply_stealth_sync(ctx)
                 yield ctx
             finally:
                 browser.close()

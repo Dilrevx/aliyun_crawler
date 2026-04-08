@@ -35,6 +35,7 @@ class CrawlConfig:
     # ---- HTTP behaviour ------------------------------------------------------
     delay_range: tuple[float, float] = (1.0, 3.0)
     timeout: int = 30
+    browser_engine: str = "chromium"
 
     # ---- Browser / headless mode --------------------------------------------
     headless: bool = True
@@ -84,6 +85,10 @@ class CrawlerSettings(BaseSettings):
     page_concurrency: int = 4
     delay_range: tuple[float, float] = (1.0, 3.0)
     timeout: int = 30
+    browser_engine: str = Field(
+        default="chromium",
+        description="Playwright browser engine: chromium|firefox|webkit",
+    )
 
     headless: bool = True
     user_agent: str = (
@@ -143,6 +148,10 @@ class CrawlerSettings(BaseSettings):
         default=4,
         description="Max LLM conversation turns per CVE (1 initial + N-1 file-request rounds)",
     )
+    calltrace_output_subdir: str = Field(
+        default="yaml_calltrace",
+        description="Subdirectory under data_dir for Step3 enriched YAML output",
+    )
 
     # Logging
     log_dir: Optional[str] = Field(
@@ -169,6 +178,7 @@ class CrawlerSettings(BaseSettings):
             page_concurrency=self.page_concurrency,
             delay_range=self.delay_range,
             timeout=self.timeout,
+            browser_engine=self.browser_engine,
             headless=self.headless,
             user_agent=self.user_agent,
             data_dir=self.data_dir,
