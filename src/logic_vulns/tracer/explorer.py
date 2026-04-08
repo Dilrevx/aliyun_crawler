@@ -11,7 +11,7 @@ Given a CVE entry with a known patch commit, this module:
    an entry point or the max-round limit is hit.
 5. Writes the ``before_traces`` / ``after_traces`` fields and the
    ``patch_method_before`` / ``patch_method_after`` fields into the
-   :class:`~aliyun_crawler.models.AVDCveEntry`.
+   :class:`~vulndb_mirror.models.AVDCveEntry`.
 
 Multiple CVEs are processed concurrently via
 :meth:`CalltraceExplorer.explore_many`; per-repository ``asyncio.Lock``\s
@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from aliyun_crawler.models import AVDCveEntry, CallTraceData, PatchMethod, TraceFrame
+from vulndb_mirror.models import AVDCveEntry, CallTraceData, PatchMethod, TraceFrame
 
 logger = logging.getLogger(__name__)
 

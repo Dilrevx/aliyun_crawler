@@ -3,11 +3,11 @@
 Fetches CVE list pages from ``avd.aliyun.com/nvd/list`` and detail pages from
 ``avd.aliyun.com/detail?id=AVD-XXXX-XXXX``, renders JavaScript with Playwright
 (+ playwright-stealth to bypass the Alibaba Cloud WAF), parses the HTML with
-BeautifulSoup, and yields :class:`~aliyun_crawler.models.RawAVDEntry` objects.
+BeautifulSoup, and yields :class:`~vulndb_mirror.models.RawAVDEntry` objects.
 
 Incremental mode: pass :attr:`CrawlConfig.since` (ISO date) to skip entries
 whose ``modified_date`` is older than that threshold.  The last-seen timestamp
-is persisted in ``<data_dir>/.state.json`` by :class:`~aliyun_crawler.storage.CrawlStorage`.
+is persisted in ``<data_dir>/.state.json`` by :class:`~vulndb_mirror.storage.CrawlStorage`.
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ from playwright.async_api import async_playwright
 from playwright.sync_api import BrowserContext, Page, sync_playwright
 from playwright_stealth import Stealth
 
-from aliyun_crawler.config import CrawlConfig
-from aliyun_crawler.models import RawAVDEntry
+from vulndb_mirror.config import CrawlConfig
+from vulndb_mirror.models import RawAVDEntry
 
 logger = logging.getLogger(__name__)
 

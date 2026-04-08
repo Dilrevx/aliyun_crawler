@@ -1,4 +1,4 @@
-from aliyun_crawler.cli import main
+from vulndb_mirror.cli import main
 
 if __name__ == "__main__":
     main()

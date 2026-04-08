@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Web Frontend
 
-## Getting Started
+This folder contains the standalone Next.js frontend for browsing and operating
+the vulnerability mirror API.
 
-First, run the development server:
+## Prerequisites
+
+- Node.js 20+
+- Backend API available at `http://127.0.0.1:8787` (or custom port)
+
+## Setup
+
+```bash
+cp .env.local.example .env.local
+npm install
+```
+
+`NEXT_PUBLIC_API_BASE` is read from `.env.local`.
+
+## Run
+
+Frontend only:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Frontend + backend together (from this `web/` directory):
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run dev:full
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Default UI URL: `http://127.0.0.1:3000`
 
-## Learn More
+## Build & Lint
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm run lint
+npm run build
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Notes
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `dev:full` starts backend via `uv run vulndb-mirror api`.
+- If backend port `8787` is occupied, run backend separately with
+	`RAWDB_API_PORT=<port>` and update `NEXT_PUBLIC_API_BASE` accordingly.

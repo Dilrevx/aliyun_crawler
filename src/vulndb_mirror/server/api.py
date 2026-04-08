@@ -3,9 +3,9 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from aliyun_crawler.rawdb.models import RetryRequest
-from aliyun_crawler.rawdb.repositories import RawRepository
-from aliyun_crawler.rawdb.service import RawIngestService
+from vulndb_mirror.storage.ingest_service import RawIngestService
+from vulndb_mirror.storage.raw_models import RetryRequest
+from vulndb_mirror.storage.repositories import RawRepository
 
 
 def create_app(repository: RawRepository, service: RawIngestService) -> FastAPI:

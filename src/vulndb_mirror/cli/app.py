@@ -8,10 +8,10 @@ from pathlib import Path
 
 import uvicorn
 
-from aliyun_crawler.config import CrawlerSettings
-from aliyun_crawler.rawdb.api import create_app
-from aliyun_crawler.rawdb.factory import build_raw_repository
-from aliyun_crawler.rawdb.service import RawIngestService
+from vulndb_mirror.config import CrawlerSettings
+from vulndb_mirror.server.api import create_app
+from vulndb_mirror.storage.ingest_service import RawIngestService
+from vulndb_mirror.storage.repository_factory import build_raw_repository
 
 
 def _setup_logging(log_dir: str | None) -> None:

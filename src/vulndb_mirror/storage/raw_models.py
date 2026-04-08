@@ -5,7 +5,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from aliyun_crawler.models import RawAVDEntry
+from vulndb_mirror.models import RawAVDEntry
 
 
 class PageCheckpoint(BaseModel):

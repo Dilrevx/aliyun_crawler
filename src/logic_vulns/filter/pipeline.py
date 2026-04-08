@@ -1,4 +1,4 @@
-"""Chainable filter pipeline for :class:`~aliyun_crawler.models.RawAVDEntry`.
+"""Chainable filter pipeline for :class:`~vulndb_mirror.models.RawAVDEntry`.
 
 Usage example::
 
@@ -28,7 +28,7 @@ import re
 from collections.abc import Callable, Iterable
 from typing import Optional
 
-from aliyun_crawler.models import RawAVDEntry
+from vulndb_mirror.models import RawAVDEntry
 
 logger = logging.getLogger(__name__)
 

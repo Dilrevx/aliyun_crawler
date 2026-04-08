@@ -7,8 +7,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
-from aliyun_crawler.models import RawAVDEntry
-from aliyun_crawler.rawdb.models import (
+from vulndb_mirror.models import RawAVDEntry
+from vulndb_mirror.storage.raw_models import (
     PageCheckpoint,
     PageGap,
     RawMeta,

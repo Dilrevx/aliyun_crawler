@@ -18,7 +18,7 @@ cp .env.example .env
 3. Run crawler:
 
 ```bash
-uv run aliyun-crawler crawl
+uv run vulndb-mirror crawl
 ```
 
 ## Commands
@@ -26,31 +26,37 @@ uv run aliyun-crawler crawl
 ### Crawl incremental raw data
 
 ```bash
-uv run aliyun-crawler crawl
-uv run aliyun-crawler crawl --start-page 50
+uv run vulndb-mirror crawl
+uv run vulndb-mirror crawl --start-page 50
 ```
 
 ### Show missing/failed page ranges
 
 ```bash
-uv run aliyun-crawler gaps
+uv run vulndb-mirror gaps
 ```
 
 ### Retry specific pages
 
 ```bash
-uv run aliyun-crawler retry --pages 50 51 52
+uv run vulndb-mirror retry --pages 50 51 52
 ```
 
 ### Start API service
 
 ```bash
-uv run aliyun-crawler api
+uv run vulndb-mirror api
+```
+
+If port `8787` is already in use:
+
+```bash
+RAWDB_API_PORT=8791 uv run vulndb-mirror api
 ```
 
 Then open:
 
-- `http://127.0.0.1:8787/docs` for OpenAPI docs
+- `http://127.0.0.1:<RAWDB_API_PORT>/docs` for OpenAPI docs (default port is `8787`)
 
 ### Start standalone web UI
 

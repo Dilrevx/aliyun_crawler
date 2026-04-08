@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "dev:full": "concurrently \"cd .. && uv run aliyun-crawler api\" \"npm run dev\"",
+    "dev:full": "concurrently \"cd .. && uv run vulndb-mirror api\" \"npm run dev\"",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"

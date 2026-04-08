@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aliyun_crawler.config import CrawlerSettings
-from aliyun_crawler.rawdb.repositories import (
+from vulndb_mirror.config import CrawlerSettings
+from vulndb_mirror.storage.repositories import (
     DualWriteRawRepository,
     FileRawRepository,
     RawRepository,

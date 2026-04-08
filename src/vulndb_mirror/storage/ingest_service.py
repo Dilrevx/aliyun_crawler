@@ -7,15 +7,15 @@ from typing import Optional
 
 from playwright.async_api import async_playwright
 
-from aliyun_crawler.config import CrawlConfig
-from aliyun_crawler.crawler.core import _BROWSER_ARGS, _STEALTH, _USER_AGENT, AVDCrawler
-from aliyun_crawler.rawdb.models import (
+from vulndb_mirror.config import CrawlConfig
+from vulndb_mirror.crawler.core import _BROWSER_ARGS, _STEALTH, _USER_AGENT, AVDCrawler
+from vulndb_mirror.storage.raw_models import (
     CrawlRunResult,
     PageCheckpoint,
     RetryResult,
     now_iso,
 )
-from aliyun_crawler.rawdb.repositories import RawRepository
+from vulndb_mirror.storage.repositories import RawRepository
 
 logger = logging.getLogger(__name__)
 

@@ -2,8 +2,8 @@
 
 Responsibilities
 ----------------
-* Persist raw :class:`~aliyun_crawler.models.RawAVDEntry` objects to JSON.
-* Write enriched :class:`~aliyun_crawler.models.AVDCveEntry` objects to
+* Persist raw :class:`~vulndb_mirror.models.RawAVDEntry` objects to JSON.
+* Write enriched :class:`~vulndb_mirror.models.AVDCveEntry` objects to
   per-CVE YAML files (``<data_dir>/yaml/CVE-XXXX-XXXX.yaml``).
 * Maintain an incremental-crawl state file (``<data_dir>/.state.json``) that
   tracks the timestamp of the *most recently seen* entry so subsequent runs
@@ -34,7 +34,7 @@ from typing import Any, Optional
 
 import yaml
 
-from aliyun_crawler.models import AVDCveEntry, RawAVDEntry
+from vulndb_mirror.models import AVDCveEntry, RawAVDEntry
 
 logger = logging.getLogger(__name__)
 
