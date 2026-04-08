@@ -455,116 +455,42 @@ export default function Home() {
                             </div>
                         </div>
 
-                        <div className="space-y-4">
+                        <div className="divide-y divide-slate-200 overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-[0_14px_40px_rgba(15,23,42,0.08)]">
                             {rows.map((item) => {
                                 const poc = summarizePoc(item, pocRuleMode);
                                 const sevTone = riskTone(item.severity);
                                 const refs = unique((item.references || []).filter(Boolean)).slice(0, 8);
                                 const patches = unique((item.patch_urls || []).filter(Boolean));
                                 const affected = item.affected_software || [];
+                                const cweText = [item.cwe_id || "-", item.cwe_description || "-"]
+                                    .filter(Boolean)
+                                    .join(" | ");
+                                const cvssText = `score=${scoreText(item.cvss_score)} | vector=${item.cvss_vector || "-"}`;
 
                                 return (
-                                    <article key={item.cve_id} className="overflow-hidden rounded-[30px] border border-slate-200 bg-white shadow-[0_18px_55px_rgba(15,23,42,0.08)]">
-                                        <div className="grid gap-0 xl:grid-cols-[1.2fr_0.8fr]">
-                                            <div className="p-5 md:p-6">
-                                                <div className="flex flex-wrap items-start gap-3">
-                                                    <div>
-                                                        <div className="flex flex-wrap items-center gap-2">
-                                                            <h3 className="text-xl font-semibold text-slate-950 md:text-2xl">{item.cve_id}</h3>
-                                                            <span className={`rounded-full px-3 py-1 text-xs ring-1 ${toneClass(sevTone)}`}>{item.severity || "unknown"}</span>
-                                                            <span className={`rounded-full px-3 py-1 text-xs ring-1 ${toneClass(poc.tone)}`}>{poc.label}</span>
-                                                            {patches.length ? <span className="rounded-full bg-slate-900 px-3 py-1 text-xs text-white">patch {patches.length}</span> : null}
-                                                        </div>
-                                                        <p className="mt-2 max-w-4xl text-sm leading-7 text-slate-600">{item.title || "无标题"}</p>
-                                                    </div>
-                                                    <div className="ml-auto flex flex-wrap gap-2">
-                                                        <button className="rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-blue-300 hover:bg-blue-50" onClick={() => openDetail(item)}>打开抽屉</button>
-                                                        {item.detail_url ? (
-                                                            <a className="rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-blue-300 hover:bg-blue-50" href={item.detail_url} target="_blank" rel="noreferrer">原始详情</a>
-                                                        ) : null}
-                                                    </div>
-                                                </div>
-
-                                                <p className="mt-4 whitespace-pre-wrap text-sm leading-7 text-slate-700">{item.description || "暂无描述"}</p>
-
-                                                <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                                                    <SmallCard title="CWE" value={item.cwe_id || "-"} desc={item.cwe_description || "-"} />
-                                                    <SmallCard title="CVSS" value={scoreText(item.cvss_score)} desc={item.cvss_vector || "-"} />
-                                                    <SmallCard title="发布 / 更新" value={textOrDash(item.published_date)} desc={textOrDash(item.modified_date)} />
-                                                    <SmallCard title="引用 / 补丁" value={`${refs.length} / ${patches.length}`} desc={item.detail_url ? "有详情链接" : "无详情链接"} />
-                                                </div>
-
-                                                <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                                                    <div className="rounded-2xl border border-slate-200 p-4">
-                                                        <div className="text-xs uppercase tracking-widest text-slate-500">详情摘要</div>
-                                                        <div className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-sm leading-7 text-slate-700">
-                                                            {item.description || "暂无描述"}
-                                                        </div>
-                                                    </div>
-                                                    <div className="rounded-2xl border border-slate-200 p-4">
-                                                        <div className="text-xs uppercase tracking-widest text-slate-500">Affected Software</div>
-                                                        <div className="mt-3 flex flex-wrap gap-2">
-                                                            {affected.length ? (
-                                                                affected.map((x) => (
-                                                                    <span key={x} className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">
-                                                                        {x}
-                                                                    </span>
-                                                                ))
-                                                            ) : (
-                                                                <span className="text-sm text-slate-500">-</span>
-                                                            )}
-                                                        </div>
-                                                    </div>
-                                                </div>
+                                    <article key={item.cve_id} className="px-4 py-4 md:px-5 md:py-4">
+                                        <div className="flex flex-wrap items-start gap-2">
+                                            <h3 className="text-lg font-semibold text-slate-950">{item.cve_id}</h3>
+                                            <span className={`rounded-full px-2.5 py-0.5 text-xs ring-1 ${toneClass(sevTone)}`}>{item.severity || "unknown"}</span>
+                                            <span className={`rounded-full px-2.5 py-0.5 text-xs ring-1 ${toneClass(poc.tone)}`}>{poc.label}</span>
+                                            {patches.length ? <span className="rounded-full bg-slate-900 px-2.5 py-0.5 text-xs text-white">patch {patches.length}</span> : null}
+                                            <div className="ml-auto flex flex-wrap gap-2">
+                                                <button className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700" onClick={() => openDetail(item)}>详情抽屉</button>
+                                                {item.detail_url ? (
+                                                    <a className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700" href={item.detail_url} target="_blank" rel="noreferrer">原始详情</a>
+                                                ) : null}
                                             </div>
+                                        </div>
 
-                                            <div className="border-t border-slate-200 bg-gradient-to-b from-slate-50 to-white p-5 md:p-6 xl:border-l xl:border-t-0">
-                                                <div className="space-y-4">
-                                                    <div>
-                                                        <div className="text-xs uppercase tracking-widest text-slate-500">PoC 状态</div>
-                                                        <div className={`mt-2 inline-flex rounded-full px-3 py-1 text-sm ring-1 ${toneClass(poc.tone)}`}>{poc.label}</div>
-                                                        <p className="mt-2 text-sm leading-7 text-slate-600">PoC 依据标题、描述、引用和补丁链接做启发式判断。右上角规则可切 strict / balanced / loose。</p>
-                                                    </div>
+                                        <p className="mt-1 text-sm text-slate-600">{item.title || "无标题"}</p>
 
-                                                    <div>
-                                                        <div className="text-xs uppercase tracking-widest text-slate-500">Patch Links</div>
-                                                        <div className="mt-3 space-y-2">
-                                                            {patches.length ? patches.map((url) => (
-                                                                <a key={url} href={url} target="_blank" rel="noreferrer" className="block rounded-2xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800 transition hover:border-blue-300 hover:bg-blue-100">
-                                                                    {linkHost(url)}
-                                                                    <span className="mt-1 block break-all text-[11px] text-blue-700/80">{url}</span>
-                                                                </a>
-                                                            )) : <div className="text-sm text-slate-500">无补丁链接</div>}
-                                                        </div>
-                                                    </div>
-
-                                                    <div>
-                                                        <div className="text-xs uppercase tracking-widest text-slate-500">References</div>
-                                                        <div className="mt-3 flex flex-wrap gap-2">
-                                                            {refs.length ? refs.map((url) => (
-                                                                <a key={url} href={url} target="_blank" rel="noreferrer" className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-700 transition hover:border-slate-400 hover:bg-slate-50">
-                                                                    {linkHost(url)}
-                                                                </a>
-                                                            )) : <span className="text-sm text-slate-500">-</span>}
-                                                        </div>
-                                                    </div>
-
-                                                    <div className="grid grid-cols-2 gap-2">
-                                                        <button className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white" onClick={() => openDetail(item)}>
-                                                            抽屉详情
-                                                        </button>
-                                                        {item.detail_url ? (
-                                                            <a className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-center text-sm font-medium text-slate-700" href={item.detail_url} target="_blank" rel="noreferrer">
-                                                                外部打开
-                                                            </a>
-                                                        ) : (
-                                                            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-center text-sm text-slate-400">
-                                                                无外链
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </div>
+                                        <div className="mt-3 space-y-2 text-sm leading-6 text-slate-700">
+                                            <CollapsibleText label="简介" text={item.description || "暂无描述"} lines={2} />
+                                            <CollapsibleText label="CWE(+解释)" text={cweText} lines={2} />
+                                            <CollapsibleText label="CVSS" text={cvssText} lines={2} mono />
+                                            <CollapsibleLinks label="补丁链接" urls={patches} />
+                                            <CollapsibleLinks label="引用链接" urls={refs} limit={5} />
+                                            <CollapsibleText label="Affected Software" text={affected.length ? affected.join(" | ") : "-"} lines={2} />
                                         </div>
                                     </article>
                                 );
@@ -612,11 +538,25 @@ export default function Home() {
                         </div>
 
                         <div className="space-y-4 p-5">
-                            <div className="grid gap-3 md:grid-cols-2">
-                                <SmallCard title="标题" value={selected.title || "-"} desc={selected.severity || "-"} />
-                                <SmallCard title="CWE" value={selected.cwe_id || "-"} desc={selected.cwe_description || "-"} />
-                                <SmallCard title="CVSS" value={scoreText(selected.cvss_score)} desc={selected.cvss_vector || "-"} />
-                                <SmallCard title="更新" value={textOrDash(selected.modified_date)} desc={textOrDash(selected.published_date)} />
+                            <div className="rounded-3xl border border-slate-200 bg-slate-50/70 p-4 space-y-2">
+                                <CollapsibleText label="标题" text={selected.title || "-"} lines={2} />
+                                <CollapsibleText label="严重等级" text={selected.severity || "-"} lines={1} />
+                                <CollapsibleText
+                                    label="CWE"
+                                    text={`${selected.cwe_id || "-"}${selected.cwe_description ? ` - ${selected.cwe_description}` : ""}`}
+                                    lines={2}
+                                />
+                                <CollapsibleText
+                                    label="CVSS"
+                                    text={`${scoreText(selected.cvss_score)}${selected.cvss_vector ? ` (${selected.cvss_vector})` : ""}`}
+                                    lines={2}
+                                    mono
+                                />
+                                <CollapsibleText
+                                    label="时间"
+                                    text={`更新 ${textOrDash(selected.modified_date)} / 发布 ${textOrDash(selected.published_date)}`}
+                                    lines={1}
+                                />
                             </div>
 
                             <div className="rounded-3xl bg-slate-950 p-4 text-white">
@@ -663,12 +603,63 @@ function Stat({ label, value, tone }: { label: string; value: number; tone: "cri
     );
 }
 
-function SmallCard({ title, value, desc }: { title: string; value: string; desc: string }) {
+function CollapsibleText({ label, text, lines = 2, mono = false }: { label: string; text: string; lines?: number; mono?: boolean }) {
+    const [expanded, setExpanded] = useState(false);
+    const clampClass = lines === 1 ? "line-clamp-1" : lines === 2 ? "line-clamp-2" : "line-clamp-3";
     return (
-        <div className="rounded-2xl bg-slate-50 p-4">
-            <div className="text-xs uppercase tracking-widest text-slate-500">{title}</div>
-            <div className="mt-1 text-sm font-semibold text-slate-900">{value}</div>
-            <div className="mt-2 max-h-24 overflow-auto text-xs leading-5 text-slate-500">{desc}</div>
+        <div>
+            <p className="text-sm leading-6 text-slate-700">
+                <strong className="font-semibold text-slate-900">{label}: </strong>
+                <span className={`${mono ? "font-mono text-[13px]" : ""} ${expanded ? "" : clampClass}`}>
+                    {text || "-"}
+                </span>
+            </p>
+            <button
+                type="button"
+                className="mt-0.5 text-xs font-medium text-blue-600 hover:text-blue-500"
+                onClick={() => setExpanded((v) => !v)}
+            >
+                {expanded ? "收起" : "展开"}
+            </button>
+        </div>
+    );
+}
+
+function CollapsibleLinks({ label, urls, limit = 3 }: { label: string; urls: string[]; limit?: number }) {
+    const [expanded, setExpanded] = useState(false);
+    const show = expanded ? urls : urls.slice(0, limit);
+    return (
+        <div>
+            <p className="text-sm leading-6 text-slate-700">
+                <strong className="font-semibold text-slate-900">{label}: </strong>
+            </p>
+            {show.length ? (
+                <div className="mt-1 flex flex-wrap gap-2">
+                    {show.map((url) => (
+                        <a
+                            key={url}
+                            href={url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-700 hover:border-slate-400"
+                            title={url}
+                        >
+                            {linkHost(url)}
+                        </a>
+                    ))}
+                </div>
+            ) : (
+                <p className="text-sm text-slate-500">-</p>
+            )}
+            {urls.length > limit ? (
+                <button
+                    type="button"
+                    className="mt-1 text-xs font-medium text-blue-600 hover:text-blue-500"
+                    onClick={() => setExpanded((v) => !v)}
+                >
+                    {expanded ? "收起" : `展开 ${urls.length - limit} 条`}
+                </button>
+            ) : null}
         </div>
     );
 }
