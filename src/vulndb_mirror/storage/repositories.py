@@ -19,6 +19,20 @@ from vulndb_mirror.storage.raw_models import (
 logger = logging.getLogger(__name__)
 
 
+def _utc_today() -> str:
+    return now_iso()[:10]
+
+
+def _expand_neighbor_pages(pages: list[int], *, max_offset: int = 1) -> list[int]:
+    out: set[int] = set()
+    for page in pages:
+        for offset in range(-max_offset, max_offset + 1):
+            candidate = page + offset
+            if candidate >= 1:
+                out.add(candidate)
+    return sorted(out)
+
+
 class RawRepository(ABC):
     @abstractmethod
     def upsert_raw(self, entry: RawAVDEntry, *, page: int) -> None:
@@ -79,11 +93,13 @@ class FileRawRepository(RawRepository):
                 "last_seen_date": None,
                 "last_seen_cve": None,
                 "resumable_from_page": 1,
+                "page_tracking_date": _utc_today(),
                 "page_checkpoints": {},
                 "page_cve_index": {},
             }
         try:
-            return json.loads(self.state_file.read_text(encoding="utf-8"))
+            state = json.loads(self.state_file.read_text(encoding="utf-8"))
+            return self._normalize_page_tracking_state(state)
         except Exception:
             logger.warning("Failed to read state file, recreating: %s", self.state_file)
             return {
@@ -91,9 +107,44 @@ class FileRawRepository(RawRepository):
                 "last_seen_date": None,
                 "last_seen_cve": None,
                 "resumable_from_page": 1,
+                "page_tracking_date": _utc_today(),
                 "page_checkpoints": {},
                 "page_cve_index": {},
             }
+
+    def _normalize_page_tracking_state(self, state: dict) -> dict:
+        today = _utc_today()
+        tracking_date = state.get("page_tracking_date")
+        if tracking_date != today:
+            # List pages are reverse-chronological and can drift daily.
+            # Keep historical page<->CVE mapping and derive a resume hint window.
+            last_seen_cve = state.get("last_seen_cve")
+            page_index = state.get("page_cve_index") or {}
+            anchor_pages: list[int] = []
+            if last_seen_cve:
+                for page_key, cves in page_index.items():
+                    if not isinstance(cves, list):
+                        continue
+                    if last_seen_cve in cves:
+                        try:
+                            anchor_pages.append(int(page_key))
+                        except (TypeError, ValueError):
+                            continue
+
+            resume_hint_pages = _expand_neighbor_pages(anchor_pages, max_offset=1)
+            state["page_tracking_date"] = today
+            state["resume_hint_pages"] = resume_hint_pages
+            if resume_hint_pages:
+                # Start from the earliest candidate page and re-crawl forward.
+                state["resumable_from_page"] = min(resume_hint_pages)
+            state["updated_at"] = now_iso()
+            self._save_state(state)
+        else:
+            state.setdefault("page_checkpoints", {})
+            state.setdefault("page_cve_index", {})
+            state.setdefault("resumable_from_page", 1)
+            state.setdefault("resume_hint_pages", [])
+        return state
 
     def _save_state(self, state: dict) -> None:
         state["updated_at"] = now_iso()
@@ -282,6 +333,43 @@ class SqliteRawRepository(RawRepository):
                 """
             )
             conn.commit()
+        self._refresh_page_tracking_if_stale()
+
+    def _refresh_page_tracking_if_stale(self) -> None:
+        today = _utc_today()
+        current = self._get_meta("page_tracking_date")
+        if current == today:
+            return
+        last_seen_cve = self._get_meta("last_seen_cve")
+        anchor_pages: list[int] = []
+        if last_seen_cve:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT page FROM raw_entries WHERE cve_id=? ORDER BY page ASC",
+                    (last_seen_cve,),
+                ).fetchall()
+            anchor_pages = [int(row["page"]) for row in rows if row["page"] is not None]
+        resume_hint_pages = _expand_neighbor_pages(anchor_pages, max_offset=1)
+
+        with self._connect() as conn:
+            if resume_hint_pages:
+                conn.execute(
+                    "INSERT INTO raw_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("resumable_from_page", str(min(resume_hint_pages))),
+                )
+                conn.execute(
+                    "INSERT INTO raw_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("resume_hint_pages", json.dumps(resume_hint_pages)),
+                )
+            conn.execute(
+                "INSERT INTO raw_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("page_tracking_date", today),
+            )
+            conn.execute(
+                "INSERT INTO raw_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("updated_at", now_iso()),
+            )
+            conn.commit()
 
     def _set_meta(self, key: str, value: Optional[str]) -> None:
         with self._connect() as conn:
@@ -299,6 +387,7 @@ class SqliteRawRepository(RawRepository):
             return None if row is None else row["value"]
 
     def upsert_raw(self, entry: RawAVDEntry, *, page: int) -> None:
+        self._refresh_page_tracking_if_stale()
         modified = (
             entry.modified_date.strftime("%Y-%m-%d") if entry.modified_date else None
         )
@@ -384,6 +473,7 @@ class SqliteRawRepository(RawRepository):
         )
 
     def save_checkpoint(self, checkpoint: PageCheckpoint) -> None:
+        self._refresh_page_tracking_if_stale()
         with self._connect() as conn:
             conn.execute(
                 """
@@ -410,6 +500,7 @@ class SqliteRawRepository(RawRepository):
             self.update_resume_page(checkpoint.page + 1)
 
     def list_checkpoints(self, *, status: Optional[str] = None) -> list[PageCheckpoint]:
+        self._refresh_page_tracking_if_stale()
         sql = "SELECT * FROM page_checkpoints"
         args: list[object] = []
         if status:
@@ -431,6 +522,7 @@ class SqliteRawRepository(RawRepository):
         ]
 
     def get_gaps(self, *, max_page: int, include_failed: bool = True) -> list[PageGap]:
+        self._refresh_page_tracking_if_stale()
         cps = {cp.page: cp for cp in self.list_checkpoints()}
         missing_pages: list[int] = []
         failed_pages: list[int] = []
@@ -443,6 +535,7 @@ class SqliteRawRepository(RawRepository):
         return _compress_gaps(missing_pages, failed_pages)
 
     def get_meta(self) -> RawMeta:
+        self._refresh_page_tracking_if_stale()
         updated = self._get_meta("updated_at") or now_iso()
         return RawMeta(
             updated_at=updated,
@@ -452,15 +545,22 @@ class SqliteRawRepository(RawRepository):
         )
 
     def update_resume_page(self, page: int) -> None:
+        self._refresh_page_tracking_if_stale()
         self._set_meta("resumable_from_page", str(max(1, int(page))))
         self._set_meta("updated_at", now_iso())
 
     def list_cve_ids(self, *, pages: Optional[list[int]] = None) -> list[str]:
+        self._refresh_page_tracking_if_stale()
         with self._connect() as conn:
             if pages:
                 placeholders = ",".join("?" for _ in pages)
                 rows = conn.execute(
-                    f"SELECT DISTINCT cve_id FROM raw_entries WHERE page IN ({placeholders}) ORDER BY cve_id ASC",
+                    (
+                        "SELECT DISTINCT cve_id "
+                        "FROM raw_entries "
+                        f"WHERE page IN ({placeholders}) "
+                        "ORDER BY cve_id ASC"
+                    ),
                     pages,
                 ).fetchall()
             else:
