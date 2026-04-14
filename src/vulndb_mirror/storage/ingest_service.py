@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, replace
+from typing import Literal, Optional
 
 from playwright.async_api import async_playwright
 
 from vulndb_mirror.config import CrawlConfig
 from vulndb_mirror.crawler.core import _BROWSER_ARGS, _STEALTH, _USER_AGENT, AVDCrawler
 from vulndb_mirror.storage.raw_models import (
+    CrawlPhaseResult,
     CrawlRunResult,
     PageCheckpoint,
     RetryResult,
@@ -37,21 +38,30 @@ class RawIngestService:
         self.repository = repository
 
     def crawl_incremental(self, start_page: Optional[int] = None) -> CrawlRunResult:
-        if start_page is None:
-            gaps = self.repository.get_gaps(
-                max_page=self.config.max_pages,
-                include_failed=True,
+        sync_mode = (self.config.sync_mode or "hybrid").lower()
+        if start_page is not None or sync_mode == "linear":
+            linear_start = (
+                start_page if start_page is not None else self._resolve_linear_start_page()
             )
-            start_page = (
-                gaps[0].start_page
-                if gaps
-                else self.repository.get_meta().resumable_from_page
+            result = asyncio.run(
+                self._crawl_page_range(
+                    start_page=linear_start,
+                    max_page=self.config.max_pages,
+                    apply_since=True,
+                )
             )
-        return asyncio.run(
-            self._crawl_page_range(
-                start_page=start_page, max_page=self.config.max_pages
+            phase = self._to_phase("linear", result)
+            return CrawlRunResult(
+                start_page=result.start_page,
+                last_page=result.last_page,
+                saved_entries=result.saved_entries,
+                stopped_by_since=result.stopped_by_since,
+                executed_pages=result.executed_pages,
+                failed_pages=result.failed_pages,
+                mode="linear",
+                phases=[phase],
             )
-        )
+        return asyncio.run(self._crawl_hybrid())
 
     def retry_pages(self, pages: list[int]) -> RetryResult:
         if not pages:
@@ -69,9 +79,18 @@ class RawIngestService:
         )
 
     async def _crawl_page_range(
-        self, *, start_page: int, max_page: int
+        self,
+        *,
+        start_page: int,
+        max_page: int,
+        apply_since: bool,
+        since_override: Optional[str] = None,
+        skip_ok_checkpoints: bool = False,
     ) -> CrawlRunResult:
-        crawler = AVDCrawler(self.config)
+        crawler_config = self.config
+        if since_override is not None:
+            crawler_config = replace(self.config, since=since_override)
+        crawler = AVDCrawler(crawler_config)
         concurrency = max(1, self.config.page_concurrency)
 
         saved_entries = 0
@@ -80,6 +99,12 @@ class RawIngestService:
         stopped_by_since = False
         stop_all = False
         last_page = start_page
+        checkpoint_map: dict[int, PageCheckpoint] = {}
+        if skip_ok_checkpoints:
+            checkpoint_map = {
+                cp.page: cp for cp in self.repository.list_checkpoints(status=None)
+            }
+        head_recheck_pages = max(0, int(getattr(self.config, "head_recheck_pages", 0)))
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -96,14 +121,25 @@ class RawIngestService:
 
                 page_num = max(1, start_page)
                 while page_num <= max_page and not stop_all:
-                    window = list(
-                        range(page_num, min(page_num + concurrency, max_page + 1))
+                    window, next_page, stop_all = self._build_page_window(
+                        page_num=page_num,
+                        max_page=max_page,
+                        concurrency=concurrency,
+                        apply_since=apply_since,
+                        skip_ok_checkpoints=skip_ok_checkpoints,
+                        checkpoint_map=checkpoint_map,
+                        head_recheck_pages=head_recheck_pages,
                     )
+                    if stop_all:
+                        break
+                    if not window:
+                        page_num = next_page
+                        continue
                     page_results = await self._execute_window(
                         crawler,
                         ctx,
                         window,
-                        apply_since=True,
+                        apply_since=apply_since,
                     )
                     for page_result in page_results:
                         executed_pages.append(page_result.page)
@@ -118,7 +154,15 @@ class RawIngestService:
                         if page_result.status == "ok" and not page_result.has_next:
                             stop_all = True
                             break
-                    page_num += concurrency
+                        checkpoint_map[page_result.page] = PageCheckpoint(
+                            page=page_result.page,
+                            status=page_result.status,  # type: ignore[arg-type]
+                            entry_count=page_result.entry_count,
+                            has_next=page_result.has_next,
+                            error=page_result.error,
+                            updated_at=now_iso(),
+                        )
+                    page_num = next_page
             finally:
                 await browser.close()
 
@@ -130,7 +174,44 @@ class RawIngestService:
             stopped_by_since=stopped_by_since,
             executed_pages=executed_pages,
             failed_pages=failed_pages,
+            mode="linear",
         )
+
+    def _build_page_window(
+        self,
+        *,
+        page_num: int,
+        max_page: int,
+        concurrency: int,
+        apply_since: bool,
+        skip_ok_checkpoints: bool,
+        checkpoint_map: dict[int, PageCheckpoint],
+        head_recheck_pages: int,
+    ) -> tuple[list[int], int, bool]:
+        window: list[int] = []
+        cursor = page_num
+        stop_all = False
+
+        while cursor <= max_page and len(window) < concurrency:
+            cp = checkpoint_map.get(cursor)
+            should_force_recheck = cursor <= head_recheck_pages
+            can_skip_ok = (
+                skip_ok_checkpoints
+                and apply_since
+                and not should_force_recheck
+                and cp is not None
+                and cp.status == "ok"
+                and cp.entry_count > 0
+            )
+            if can_skip_ok:
+                if not cp.has_next:
+                    stop_all = True
+                    break
+                cursor += 1
+                continue
+            window.append(cursor)
+            cursor += 1
+        return window, cursor, stop_all
 
     async def _crawl_explicit_pages(self, pages: list[int]) -> CrawlRunResult:
         crawler = AVDCrawler(self.config)
@@ -176,6 +257,89 @@ class RawIngestService:
             stopped_by_since=False,
             executed_pages=executed_pages,
             failed_pages=failed_pages,
+            mode="linear",
+        )
+
+    async def _crawl_hybrid(self) -> CrawlRunResult:
+        phases: list[CrawlPhaseResult] = []
+
+        head_result = await self._crawl_page_range(
+            start_page=1,
+            max_page=self.config.max_pages,
+            apply_since=True,
+            since_override=self._resolve_head_since(),
+            skip_ok_checkpoints=bool(
+                getattr(self.config, "head_skip_ok_pages", False)
+            ),
+        )
+        self.repository.update_sync_markers(head_last_stop_page=head_result.last_page)
+        phases.append(self._to_phase("head_incremental", head_result))
+        return self._merge_phases(phases, mode="hybrid")
+
+    def _resolve_linear_start_page(self) -> int:
+        gaps = self.repository.get_gaps(
+            max_page=self.config.max_pages,
+            include_failed=True,
+        )
+        return (
+            gaps[0].start_page if gaps else self.repository.get_meta().resumable_from_page
+        )
+
+    def _resolve_head_since(self) -> Optional[str]:
+        if self.config.since:
+            return self.config.since
+        return self.repository.get_meta().last_seen_date
+
+    def _to_phase(
+        self,
+        phase: Literal["head_incremental", "linear"],
+        result: CrawlRunResult,
+    ) -> CrawlPhaseResult:
+        return CrawlPhaseResult(
+            phase=phase,
+            start_page=result.start_page,
+            last_page=result.last_page,
+            saved_entries=result.saved_entries,
+            stopped_by_since=result.stopped_by_since,
+            executed_pages=result.executed_pages,
+            failed_pages=result.failed_pages,
+        )
+
+    def _merge_phases(
+        self, phases: list[CrawlPhaseResult], *, mode: str
+    ) -> CrawlRunResult:
+        if not phases:
+            return CrawlRunResult(
+                start_page=1,
+                last_page=1,
+                saved_entries=0,
+                stopped_by_since=False,
+                executed_pages=[],
+                failed_pages=[],
+                mode="hybrid" if mode == "hybrid" else "linear",
+                phases=[],
+            )
+
+        executed_pages: list[int] = []
+        failed_pages: list[int] = []
+        saved_entries = 0
+        stopped_by_since = False
+        for phase in phases:
+            executed_pages.extend(phase.executed_pages)
+            failed_pages.extend(phase.failed_pages)
+            saved_entries += phase.saved_entries
+            stopped_by_since = stopped_by_since or phase.stopped_by_since
+
+        unique_failed = sorted(set(failed_pages))
+        return CrawlRunResult(
+            start_page=min(p.start_page for p in phases),
+            last_page=max(p.last_page for p in phases),
+            saved_entries=saved_entries,
+            stopped_by_since=stopped_by_since,
+            executed_pages=executed_pages,
+            failed_pages=unique_failed,
+            mode="hybrid" if mode == "hybrid" else "linear",
+            phases=phases,
         )
 
     async def _execute_window(

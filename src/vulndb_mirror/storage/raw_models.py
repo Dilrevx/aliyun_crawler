@@ -41,7 +41,8 @@ class RetryResult(BaseModel):
     saved_entries: int = 0
 
 
-class CrawlRunResult(BaseModel):
+class CrawlPhaseResult(BaseModel):
+    phase: Literal["head_incremental", "linear"]
     start_page: int = Field(..., ge=1)
     last_page: int = Field(..., ge=1)
     saved_entries: int = Field(..., ge=0)
@@ -50,11 +51,25 @@ class CrawlRunResult(BaseModel):
     failed_pages: list[int] = Field(default_factory=list)
 
 
+class CrawlRunResult(BaseModel):
+    start_page: int = Field(..., ge=1)
+    last_page: int = Field(..., ge=1)
+    saved_entries: int = Field(..., ge=0)
+    stopped_by_since: bool = False
+    executed_pages: list[int] = Field(default_factory=list)
+    failed_pages: list[int] = Field(default_factory=list)
+    mode: Literal["linear", "hybrid"] = "linear"
+    phases: list[CrawlPhaseResult] = Field(default_factory=list)
+
+
 class RawMeta(BaseModel):
     updated_at: str
     last_seen_date: Optional[str] = None
     last_seen_cve: Optional[str] = None
     resumable_from_page: int = 1
+    tail_anchor_page: Optional[int] = None
+    tail_last_end_page: Optional[int] = None
+    head_last_stop_page: Optional[int] = None
 
 
 class PageRangeQuery(BaseModel):

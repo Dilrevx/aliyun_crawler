@@ -52,6 +52,11 @@ class CrawlConfig:
     # ---- Incremental crawl --------------------------------------------------
     # ISO-8601 date/datetime string; only entries *after* this date are fetched.
     since: Optional[str] = None
+    # Sync mode: linear (legacy) or hybrid (head incremental + tail continuation).
+    sync_mode: str = "hybrid"
+    # Head-phase controls for hybrid sync.
+    head_skip_ok_pages: bool = True
+    head_recheck_pages: int = 10
 
     # ---- GitHub API ---------------------------------------------------------
     github_token: Optional[str] = None  # populated from env via CrawlerSettings
@@ -121,6 +126,18 @@ class CrawlerSettings(BaseSettings):
     since: Optional[str] = Field(
         default=None, description="ISO date string for incremental crawl"
     )
+    sync_mode: str = Field(
+        default="hybrid",
+        description="Sync mode: hybrid or linear",
+    )
+    head_skip_ok_pages: bool = Field(
+        default=True,
+        description="In hybrid head phase, skip pages that already have successful checkpoints",
+    )
+    head_recheck_pages: int = Field(
+        default=10,
+        description="Always re-check the first N pages in hybrid head phase",
+    )
     github_token: Optional[str] = Field(default=None, description="GitHub API token")
 
     # LLM settings (re-uses the route-hacker LLM__ variables)
@@ -184,5 +201,8 @@ class CrawlerSettings(BaseSettings):
             data_dir=self.data_dir,
             cache_ttl=self.cache_ttl,
             since=self.since,
+            sync_mode=self.sync_mode,
+            head_skip_ok_pages=self.head_skip_ok_pages,
+            head_recheck_pages=self.head_recheck_pages,
             github_token=self.github_token,
         )

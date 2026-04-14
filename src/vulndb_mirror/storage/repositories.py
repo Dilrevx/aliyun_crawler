@@ -46,6 +46,7 @@ class RawRepository(ABC):
     def query_raw(
         self,
         *,
+        q: Optional[str],
         modified_from: Optional[str],
         modified_to: Optional[str],
         page: int,
@@ -74,6 +75,16 @@ class RawRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def update_sync_markers(
+        self,
+        *,
+        head_last_stop_page: Optional[int] = None,
+        tail_anchor_page: Optional[int] = None,
+        tail_last_end_page: Optional[int] = None,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_cve_ids(self, *, pages: Optional[list[int]] = None) -> list[str]:
         raise NotImplementedError
 
@@ -96,6 +107,9 @@ class FileRawRepository(RawRepository):
                 "page_tracking_date": _utc_today(),
                 "page_checkpoints": {},
                 "page_cve_index": {},
+                "tail_anchor_page": None,
+                "tail_last_end_page": None,
+                "head_last_stop_page": None,
             }
         try:
             state = json.loads(self.state_file.read_text(encoding="utf-8"))
@@ -110,6 +124,9 @@ class FileRawRepository(RawRepository):
                 "page_tracking_date": _utc_today(),
                 "page_checkpoints": {},
                 "page_cve_index": {},
+                "tail_anchor_page": None,
+                "tail_last_end_page": None,
+                "head_last_stop_page": None,
             }
 
     def _normalize_page_tracking_state(self, state: dict) -> dict:
@@ -144,6 +161,9 @@ class FileRawRepository(RawRepository):
             state.setdefault("page_cve_index", {})
             state.setdefault("resumable_from_page", 1)
             state.setdefault("resume_hint_pages", [])
+            state.setdefault("tail_anchor_page", None)
+            state.setdefault("tail_last_end_page", None)
+            state.setdefault("head_last_stop_page", None)
         return state
 
     def _save_state(self, state: dict) -> None:
@@ -195,11 +215,13 @@ class FileRawRepository(RawRepository):
     def query_raw(
         self,
         *,
+        q: Optional[str],
         modified_from: Optional[str],
         modified_to: Optional[str],
         page: int,
         page_size: int,
     ) -> RawQueryResult:
+        terms = [t.strip().lower() for t in (q or "").split() if t.strip()]
         items: list[RawAVDEntry] = []
         for raw_path in sorted(self.raw_dir.glob("CVE-*.json")):
             try:
@@ -214,6 +236,24 @@ class FileRawRepository(RawRepository):
                 continue
             if modified_to and md and md > modified_to:
                 continue
+            if terms:
+                pool = " ".join(
+                    [
+                        item.cve_id,
+                        item.title,
+                        item.description,
+                        item.severity,
+                        item.cwe_id,
+                        item.cwe_description,
+                        item.cvss_vector,
+                        item.detail_url,
+                        " ".join(item.affected_software),
+                        " ".join(item.references),
+                        " ".join(item.patch_urls),
+                    ]
+                ).lower()
+                if not all(term in pool for term in terms):
+                    continue
             items.append(item)
 
         items.sort(
@@ -270,11 +310,30 @@ class FileRawRepository(RawRepository):
             last_seen_date=state.get("last_seen_date"),
             last_seen_cve=state.get("last_seen_cve"),
             resumable_from_page=int(state.get("resumable_from_page", 1)),
+            tail_anchor_page=_as_int_or_none(state.get("tail_anchor_page")),
+            tail_last_end_page=_as_int_or_none(state.get("tail_last_end_page")),
+            head_last_stop_page=_as_int_or_none(state.get("head_last_stop_page")),
         )
 
     def update_resume_page(self, page: int) -> None:
         state = self._load_state()
         state["resumable_from_page"] = max(1, int(page))
+        self._save_state(state)
+
+    def update_sync_markers(
+        self,
+        *,
+        head_last_stop_page: Optional[int] = None,
+        tail_anchor_page: Optional[int] = None,
+        tail_last_end_page: Optional[int] = None,
+    ) -> None:
+        state = self._load_state()
+        if head_last_stop_page is not None:
+            state["head_last_stop_page"] = max(1, int(head_last_stop_page))
+        if tail_anchor_page is not None:
+            state["tail_anchor_page"] = max(1, int(tail_anchor_page))
+        if tail_last_end_page is not None:
+            state["tail_last_end_page"] = max(1, int(tail_last_end_page))
         self._save_state(state)
 
     def list_cve_ids(self, *, pages: Optional[list[int]] = None) -> list[str]:
@@ -431,6 +490,7 @@ class SqliteRawRepository(RawRepository):
     def query_raw(
         self,
         *,
+        q: Optional[str],
         modified_from: Optional[str],
         modified_to: Optional[str],
         page: int,
@@ -438,12 +498,18 @@ class SqliteRawRepository(RawRepository):
     ) -> RawQueryResult:
         where = []
         args: list[object] = []
+        terms = [t.strip().lower() for t in (q or "").split() if t.strip()]
         if modified_from:
             where.append("(modified_date IS NULL OR modified_date >= ?)")
             args.append(modified_from)
         if modified_to:
             where.append("(modified_date IS NULL OR modified_date <= ?)")
             args.append(modified_to)
+        for _ in terms:
+            where.append("(LOWER(cve_id) LIKE ? OR LOWER(payload) LIKE ?)")
+        for term in terms:
+            like = f"%{term}%"
+            args.extend([like, like])
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
         with self._connect() as conn:
@@ -542,11 +608,32 @@ class SqliteRawRepository(RawRepository):
             last_seen_date=self._get_meta("last_seen_date"),
             last_seen_cve=self._get_meta("last_seen_cve"),
             resumable_from_page=int(self._get_meta("resumable_from_page") or "1"),
+            tail_anchor_page=_as_int_or_none(self._get_meta("tail_anchor_page")),
+            tail_last_end_page=_as_int_or_none(self._get_meta("tail_last_end_page")),
+            head_last_stop_page=_as_int_or_none(
+                self._get_meta("head_last_stop_page")
+            ),
         )
 
     def update_resume_page(self, page: int) -> None:
         self._refresh_page_tracking_if_stale()
         self._set_meta("resumable_from_page", str(max(1, int(page))))
+        self._set_meta("updated_at", now_iso())
+
+    def update_sync_markers(
+        self,
+        *,
+        head_last_stop_page: Optional[int] = None,
+        tail_anchor_page: Optional[int] = None,
+        tail_last_end_page: Optional[int] = None,
+    ) -> None:
+        self._refresh_page_tracking_if_stale()
+        if head_last_stop_page is not None:
+            self._set_meta("head_last_stop_page", str(max(1, int(head_last_stop_page))))
+        if tail_anchor_page is not None:
+            self._set_meta("tail_anchor_page", str(max(1, int(tail_anchor_page))))
+        if tail_last_end_page is not None:
+            self._set_meta("tail_last_end_page", str(max(1, int(tail_last_end_page))))
         self._set_meta("updated_at", now_iso())
 
     def list_cve_ids(self, *, pages: Optional[list[int]] = None) -> list[str]:
@@ -615,6 +702,7 @@ class DualWriteRawRepository(RawRepository):
     def query_raw(
         self,
         *,
+        q: Optional[str],
         modified_from: Optional[str],
         modified_to: Optional[str],
         page: int,
@@ -622,6 +710,7 @@ class DualWriteRawRepository(RawRepository):
     ) -> RawQueryResult:
         try:
             return self.primary.query_raw(
+                q=q,
                 modified_from=modified_from,
                 modified_to=modified_to,
                 page=page,
@@ -629,6 +718,7 @@ class DualWriteRawRepository(RawRepository):
             )
         except Exception:
             return self.secondary.query_raw(
+                q=q,
                 modified_from=modified_from,
                 modified_to=modified_to,
                 page=page,
@@ -663,6 +753,20 @@ class DualWriteRawRepository(RawRepository):
     def update_resume_page(self, page: int) -> None:
         self._dual_write("update_resume_page", page)
 
+    def update_sync_markers(
+        self,
+        *,
+        head_last_stop_page: Optional[int] = None,
+        tail_anchor_page: Optional[int] = None,
+        tail_last_end_page: Optional[int] = None,
+    ) -> None:
+        self._dual_write(
+            "update_sync_markers",
+            head_last_stop_page=head_last_stop_page,
+            tail_anchor_page=tail_anchor_page,
+            tail_last_end_page=tail_last_end_page,
+        )
+
     def list_cve_ids(self, *, pages: Optional[list[int]] = None) -> list[str]:
         try:
             result = self.primary.list_cve_ids(pages=pages)
@@ -696,3 +800,12 @@ def _compress_gaps(missing_pages: list[int], failed_pages: list[int]) -> list[Pa
     gaps.extend(_compress_pages(failed_pages, "failed"))
     gaps.sort(key=lambda g: (g.start_page, g.reason))
     return gaps
+
+
+def _as_int_or_none(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

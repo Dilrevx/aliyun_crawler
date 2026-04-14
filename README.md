@@ -27,6 +27,25 @@ uv run vulndb-mirror retry --pages 50 51
 uv run vulndb-mirror api
 ```
 
+`crawl` 默认使用 `SYNC_MODE=hybrid`，会执行：
+
+1. `head_incremental`：从第 1 页按 `SINCE`（未设置时回退到 `last_seen_date`）做前段增量。
+2. `head` 阶段默认会跳过已有成功 checkpoint 的中间页，并保留前 `HEAD_RECHECK_PAGES` 页强制重查。
+
+如需旧的单段线性行为：
+
+```bash
+SYNC_MODE=linear uv run vulndb-mirror crawl
+```
+
+常用环境变量（可写入 `.env`）：
+
+```env
+SYNC_MODE=hybrid
+HEAD_SKIP_OK_PAGES=true
+HEAD_RECHECK_PAGES=10
+```
+
 如果默认端口 `8787` 被占用：
 
 ```bash

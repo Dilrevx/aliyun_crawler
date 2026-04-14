@@ -30,6 +30,20 @@ uv run vulndb-mirror crawl
 uv run vulndb-mirror crawl --start-page 50
 ```
 
+默认 `SYNC_MODE=hybrid`，会执行 `head_incremental`：
+
+1. `head_incremental`：从第 1 页开始按 `SINCE` 做增量抓取（命中旧数据后停止）。
+2. `head` 阶段默认会跳过已成功 checkpoint 的中间页（可通过 `HEAD_SKIP_OK_PAGES` 控制），并强制重查前 `HEAD_RECHECK_PAGES` 页。
+
+这会复用已有 `page_checkpoints` 与历史元信息，不需要重跑历史结果。
+如果未设置 `SINCE`，会自动回退到上次保存的 `last_seen_date` 作为前段增量阈值。
+
+如果需要保持旧行为（单段线性）：
+
+```bash
+SYNC_MODE=linear uv run vulndb-mirror crawl
+```
+
 ### Show missing/failed page ranges
 
 ```bash
@@ -83,6 +97,9 @@ The browser is optimized for vulnerability triage:
 ```env
 MAX_PAGES=200
 PAGE_CONCURRENCY=4
+SYNC_MODE=hybrid
+HEAD_SKIP_OK_PAGES=true
+HEAD_RECHECK_PAGES=10
 DATA_DIR=./output/aliyun_cve
 RAWDB_STORAGE_BACKEND=dual
 RAWDB_API_HOST=127.0.0.1
@@ -97,3 +114,7 @@ LOG_DIR=./logs
 - SQLite DB (when backend includes sqlite): `output/aliyun_cve/raw.db`.
 - Page/meta state: `output/aliyun_cve/.rawdb.state.json`.
 - Logs: `logs/*-crawler.log` (or custom path from `LOG_DIR`).
+
+状态文件/数据库中会新增以下同步游标（自动兼容旧状态）：
+
+- `head_last_stop_page`: 上次前段增量停止页

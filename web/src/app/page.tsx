@@ -280,6 +280,7 @@ export default function Home() {
         setError("");
         try {
             const params = new URLSearchParams({ page: String(targetPage), page_size: String(targetPageSize) });
+            if (filters.search.trim()) params.set("q", filters.search.trim());
             if (filters.showAdvanced && filters.from) params.set("modified_from", filters.from);
             if (filters.showAdvanced && filters.to) params.set("modified_to", filters.to);
             const data = await apiGet<QueryResp>(`/raw?${params.toString()}`);
@@ -323,6 +324,7 @@ export default function Home() {
                 const safePage = Math.max(1, initPage || 1);
                 const safeSize = [10, 20, 50, 100].includes(initPageSize) ? initPageSize : 20;
                 const queryParams = new URLSearchParams({ page: String(safePage), page_size: String(safeSize) });
+                if (initFilters.search.trim()) queryParams.set("q", initFilters.search.trim());
                 if (initFilters.showAdvanced && initFilters.from) queryParams.set("modified_from", initFilters.from);
                 if (initFilters.showAdvanced && initFilters.to) queryParams.set("modified_to", initFilters.to);
                 const data = await apiGet<QueryResp>(`/raw?${queryParams.toString()}`);

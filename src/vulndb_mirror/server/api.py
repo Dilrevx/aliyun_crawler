@@ -31,12 +31,14 @@ def create_app(repository: RawRepository, service: RawIngestService) -> FastAPI:
 
     @app.get("/raw")
     def query_raw(
+        q: str | None = Query(default=None, description="Keyword search across raw payload fields"),
         modified_from: str | None = Query(default=None),
         modified_to: str | None = Query(default=None),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=50, ge=1, le=500),
     ):
         result = repository.query_raw(
+            q=q,
             modified_from=modified_from,
             modified_to=modified_to,
             page=page,
